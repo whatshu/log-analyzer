@@ -1,0 +1,30 @@
+[package]
+name = "log_analyzer_core"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance log analysis engine with compressed storage and reversible operations"
+
+[lib]
+name = "log_analyzer_core"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module"] }
+rayon = "1.10"
+zstd = "0.13"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+memmap2 = "0.9"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = true
