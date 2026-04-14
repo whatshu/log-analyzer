@@ -7,6 +7,7 @@ pub use storage::ChunkStorage;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::engine::{ChunkedProcessor, LineStream};
 use crate::error::{LogAnalyzerError, Result};
 use crate::index::{IndexBuilder, LineIndex};
 use crate::operator::{Operation, OperationRecord};
@@ -297,6 +298,23 @@ impl LogRepo {
     /// Get total original line count.
     pub fn original_line_count(&self) -> usize {
         self.index.total_lines
+    }
+
+    /// Create a streaming line reader for chunk-by-chunk processing.
+    /// Memory usage is O(chunk_size) instead of O(total_lines).
+    pub fn line_stream(&self) -> LineStream<'_> {
+        LineStream::new(&self.storage, &self.index)
+    }
+
+    /// Create a chunked processor for streaming operations on original data.
+    /// Use this for large files where loading all lines is impractical.
+    pub fn processor(&self) -> ChunkedProcessor<'_> {
+        ChunkedProcessor::new(&self.storage, &self.index)
+    }
+
+    /// Get a reference to the storage.
+    pub fn storage(&self) -> &ChunkStorage {
+        &self.storage
     }
 
     fn save_operations(&self) -> Result<()> {
