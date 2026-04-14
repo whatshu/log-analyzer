@@ -1,6 +1,8 @@
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use std::path::PathBuf;
 
+use crate::engine::{CollectResult, Collector};
 use crate::operator::Operation;
 use crate::repo::LogRepo;
 
@@ -219,6 +221,134 @@ impl PyLogRepo {
             min_line_len: s.min_line_len,
             chunk_count: s.chunk_count,
         })
+    }
+
+    // --- Collector methods (read-only terminal operations) ---
+
+    /// Count lines in current state, optionally filtered by regex.
+    /// Returns int.
+    #[pyo3(signature = (pattern=None))]
+    fn collect_count(&mut self, pattern: Option<&str>) -> PyResult<usize> {
+        let c = Collector::Count {
+            pattern: pattern.map(|s| s.to_string()),
+        };
+        match self.inner.collect(&c)? {
+            CollectResult::Count(n) => Ok(n),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Group lines by a regex capture group, return {group_value: count}.
+    /// `group_index` is the 1-based capture group number.
+    fn collect_group_count<'py>(
+        &mut self,
+        py: Python<'py>,
+        pattern: &str,
+        group_index: usize,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let c = Collector::GroupCount {
+            pattern: pattern.to_string(),
+            group_index,
+        };
+        match self.inner.collect(&c)? {
+            CollectResult::GroupCount(pairs) => {
+                let dict = PyDict::new(py);
+                for (k, v) in pairs {
+                    dict.set_item(k, v)?;
+                }
+                Ok(dict)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Top-N most frequent values of a regex capture group.
+    /// Returns list of (value, count) tuples sorted by count desc.
+    fn collect_top_n(
+        &mut self,
+        pattern: &str,
+        group_index: usize,
+        n: usize,
+    ) -> PyResult<Vec<(String, usize)>> {
+        let c = Collector::TopN {
+            pattern: pattern.to_string(),
+            group_index,
+            n,
+        };
+        match self.inner.collect(&c)? {
+            CollectResult::TopN(pairs) => Ok(pairs),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Collect distinct values of a regex capture group.
+    /// Returns sorted list of unique strings.
+    fn collect_unique(&mut self, pattern: &str, group_index: usize) -> PyResult<Vec<String>> {
+        let c = Collector::Unique {
+            pattern: pattern.to_string(),
+            group_index,
+        };
+        match self.inner.collect(&c)? {
+            CollectResult::Unique(vals) => Ok(vals),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Compute numeric statistics from a regex capture group.
+    /// The captured text is parsed as float. Returns dict with
+    /// keys: count, sum, min, max, avg.
+    fn collect_numeric_stats<'py>(
+        &mut self,
+        py: Python<'py>,
+        pattern: &str,
+        group_index: usize,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let c = Collector::NumericStats {
+            pattern: pattern.to_string(),
+            group_index,
+        };
+        match self.inner.collect(&c)? {
+            CollectResult::NumericStats {
+                count,
+                sum,
+                min,
+                max,
+                avg,
+            } => {
+                let dict = PyDict::new(py);
+                dict.set_item("count", count)?;
+                dict.set_item("sum", sum)?;
+                dict.set_item("min", min)?;
+                dict.set_item("max", max)?;
+                dict.set_item("avg", avg)?;
+                Ok(dict)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Compute line-length statistics over current state.
+    /// Returns dict with keys: count, total_bytes, avg_len, max_len, min_len.
+    fn collect_line_stats<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let c = Collector::LineStats;
+        match self.inner.collect(&c)? {
+            CollectResult::LineStats {
+                count,
+                total_bytes,
+                avg_len,
+                max_len,
+                min_len,
+            } => {
+                let dict = PyDict::new(py);
+                dict.set_item("count", count)?;
+                dict.set_item("total_bytes", total_bytes)?;
+                dict.set_item("avg_len", avg_len)?;
+                dict.set_item("max_len", max_len)?;
+                dict.set_item("min_len", min_len)?;
+                Ok(dict)
+            }
+            _ => unreachable!(),
+        }
     }
 }
 

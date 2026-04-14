@@ -1,6 +1,8 @@
+pub mod collector;
 mod processor;
 mod stream;
 
+pub use collector::{CollectResult, Collector};
 pub use processor::ChunkedProcessor;
 pub use stream::{LineStream, ProcessedChunk};
 

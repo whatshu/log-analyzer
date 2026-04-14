@@ -7,7 +7,7 @@ pub use storage::ChunkStorage;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::engine::{ChunkedProcessor, LineStream};
+use crate::engine::{collector, ChunkedProcessor, CollectResult, Collector, LineStream};
 use crate::error::{LogAnalyzerError, Result};
 use crate::index::{IndexBuilder, LineIndex};
 use crate::operator::{Operation, OperationRecord};
@@ -315,6 +315,29 @@ impl LogRepo {
     /// Get a reference to the storage.
     pub fn storage(&self) -> &ChunkStorage {
         &self.storage
+    }
+
+    /// Run a collector on the **current** state (original + operations).
+    /// Read-only: the repository is not modified.
+    ///
+    /// If no operations have been applied, the collector runs directly on
+    /// the compressed chunks in parallel (memory-efficient).
+    /// Otherwise it runs on the materialized current lines.
+    pub fn collect(&mut self, c: &Collector) -> Result<CollectResult> {
+        if self.operations.is_empty() {
+            // Fast path: stream over original chunks (O(chunk_size) memory)
+            collector::execute(c, &self.storage, &self.index)
+        } else {
+            // Operations applied — must use the materialized view
+            let lines = self.get_current_lines()?;
+            collector::execute_on_lines(c, &lines)
+        }
+    }
+
+    /// Run a collector on the **original** (un-modified) data only.
+    /// Always uses the streaming chunk path regardless of operations.
+    pub fn collect_original(&self, c: &Collector) -> Result<CollectResult> {
+        collector::execute(c, &self.storage, &self.index)
     }
 
     fn save_operations(&self) -> Result<()> {
