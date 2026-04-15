@@ -218,7 +218,7 @@ log-analyzer export anonymized.log
 
 ## 性能基准
 
-测试文件：897 MB 日志（215 万行）。一次性导入：**~550 ms**。
+测试文件：897 MB 日志（215 万行）。一次性导入：**~630 ms**。
 
 运行基准测试：`python3 benchmarks/bench.py [LOG_FILE]`
 
@@ -226,18 +226,19 @@ log-analyzer export anonymized.log
 
 | 任务 | grep | ripgrep | sed | awk | Python | log-analyzer |
 |------|------|---------|-----|-----|--------|--------------|
-| 计数匹配 | 200 ms | **116 ms** | — | 701 ms | 327 ms | 178 ms |
-| 过滤写文件 | 275 ms | **181 ms** | — | 750 ms | 405 ms | 557 ms |
-| 正则替换 | — | 948 ms | **640 ms** | — | 7.17 s | 967 ms |
-| 分组计数 | — | 1.26 s* | — | — | 938 ms | **250 ms** |
+| 计数匹配 | 200 ms | 113 ms | — | 700 ms | 331 ms | **119 ms** |
+| 过滤写文件 | 281 ms | **179 ms** | — | 751 ms | 400 ms | 335 ms |
+| 正则替换 | — | 943 ms | 647 ms | — | 7.16 s | **669 ms** |
+| 分组计数 | — | 1.25 s* | — | — | 949 ms | **229 ms** |
 
 *\* rg \| sort \| uniq -c 管道*
 
 **要点：**
 
-- **计数/搜索**：log-analyzer 约为 ripgrep 的 1.5 倍（内部使用 ripgrep 的 grep-searcher），快于 grep、awk、Python。
-- **正则替换**：与 sed、ripgrep 同级；比 Python 快 7 倍。
-- **聚合（分组、Top-N、统计）**：**log-analyzer 最快** — 比 Python 快 3.7 倍，比 rg|sort|uniq 管道快 5 倍。这是相对 Unix 工具的核心优势。
+- **计数**：log-analyzer 追平 ripgrep（119 ms vs 113 ms）— 内部使用 grep-searcher + 零拷贝块迭代。快于 grep、awk、Python。
+- **正则替换**：总体最快，与 sed 持平；比 Python 快 10 倍。
+- **聚合（分组、Top-N、统计）**：**log-analyzer 最快** — 比 Python 快 4 倍，比 rg|sort|uniq 管道快 5.5 倍。
+- **过滤写文件**：1.9x ripgrep — 零拷贝优化后接近（此前 3x）。
 
 ### 易用性对比
 
@@ -306,6 +307,56 @@ cargo test                  # Rust 测试（80 个）
 pytest tests/ -v            # Python 测试（101 个）
 ./build.sh test             # 构建、安装并运行全部测试
 ```
+
+## 分发
+
+### 构建 wheel
+
+```bash
+./build.sh                  # 或: maturin build --release
+```
+
+在 `target/wheels/` 下生成当前平台 + Python 版本的 `.whl` 文件。
+同平台安装：
+
+```bash
+pip install target/wheels/log_analyzer-*.whl
+```
+
+### 跨平台构建
+
+使用 [maturin](https://github.com/PyO3/maturin) 配合 `--target` 或 manylinux 容器：
+
+```bash
+# 在 Docker 中构建 manylinux wheel
+docker run --rm -v $(pwd):/io ghcr.io/pyo3/maturin build --release
+
+# 交叉编译到特定目标
+maturin build --release --target aarch64-unknown-linux-gnu
+```
+
+### 发布到 PyPI
+
+```bash
+maturin publish              # 构建并上传到 PyPI
+maturin publish --repository testpypi   # 先在 TestPyPI 测试
+```
+
+需要 PyPI 账户和令牌（`MATURIN_PYPI_TOKEN` 环境变量或 `~/.pypirc`）。
+
+### 平台矩阵
+
+多平台分发建议使用 CI（如 GitHub Actions）为每个目标构建 wheel：
+
+| 平台 | 目标 |
+|------|------|
+| Linux x86_64 | `x86_64-unknown-linux-gnu`（manylinux） |
+| Linux aarch64 | `aarch64-unknown-linux-gnu` |
+| macOS x86_64 | `x86_64-apple-darwin` |
+| macOS ARM | `aarch64-apple-darwin` |
+| Windows x86_64 | `x86_64-pc-windows-msvc` |
+
+每个 wheel 内嵌编译好的 Rust 扩展——终端用户只需 `pip install`，无需 Rust 工具链。
 
 ## 许可证
 

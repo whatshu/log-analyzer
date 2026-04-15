@@ -232,7 +232,7 @@ log-analyzer export anonymized.log
 
 ## Benchmarks
 
-Tested on a 897 MB log file (2.15 million lines). One-time import: **~550 ms**.
+Tested on a 897 MB log file (2.15 million lines). One-time import: **~630 ms**.
 
 Run the benchmark yourself: `python3 benchmarks/bench.py [LOG_FILE]`
 
@@ -240,19 +240,19 @@ Run the benchmark yourself: `python3 benchmarks/bench.py [LOG_FILE]`
 
 | Task | grep | ripgrep | sed | awk | Python | log-analyzer |
 |------|------|---------|-----|-----|--------|--------------|
-| Count matches | 200 ms | **116 ms** | — | 701 ms | 327 ms | 178 ms |
-| Filter to file | 275 ms | **181 ms** | — | 750 ms | 405 ms | 557 ms |
-| Regex replace | — | 948 ms | **640 ms** | — | 7.17 s | 967 ms |
-| Group-by count | — | 1.26 s* | — | — | 938 ms | **250 ms** |
+| Count matches | 200 ms | 113 ms | — | 700 ms | 331 ms | **119 ms** |
+| Filter to file | 281 ms | **179 ms** | — | 751 ms | 400 ms | 335 ms |
+| Regex replace | — | 943 ms | 647 ms | — | 7.16 s | **669 ms** |
+| Group-by count | — | 1.25 s* | — | — | 949 ms | **229 ms** |
 
 *\* rg \| sort \| uniq -c pipeline*
 
 **Key takeaways:**
 
-- **Counting/searching**: log-analyzer is 1.5x ripgrep (uses ripgrep's grep-searcher internally), faster than grep, awk, and Python.
-- **Regex replace**: On par with sed and ripgrep; 7x faster than Python.
-- **Aggregation (group-by, top-N, stats)**: **log-analyzer is fastest** — 3.7x faster than Python, 5x faster than rg|sort|uniq pipe. This is the core advantage over Unix tools.
-- **Filter to file**: ripgrep and grep are faster for raw file-to-file filtering since they avoid decompression overhead.
+- **Counting**: log-analyzer matches ripgrep speed (119 ms vs 113 ms) — uses ripgrep's grep-searcher + zero-copy chunk iteration. Faster than grep, awk, and Python.
+- **Regex replace**: Fastest overall, on par with sed; 10x faster than Python.
+- **Aggregation (group-by, top-N, stats)**: **log-analyzer is fastest** — 4x faster than Python, 5.5x faster than rg|sort|uniq pipe.
+- **Filter to file**: 1.9x ripgrep — close after zero-copy optimization (previously 3x).
 
 ### Usability comparison
 
@@ -341,6 +341,56 @@ cargo test                  # Rust tests (80 tests)
 pytest tests/ -v            # Python tests (101 tests)
 ./build.sh test             # Build, install, and run all tests
 ```
+
+## Distribution
+
+### Build a wheel
+
+```bash
+./build.sh                  # or: maturin build --release
+```
+
+Produces a `.whl` in `target/wheels/` for the current platform + Python version.
+Install on the same platform with:
+
+```bash
+pip install target/wheels/log_analyzer-*.whl
+```
+
+### Cross-platform wheels
+
+Use [maturin](https://github.com/PyO3/maturin) with `--target` or in a manylinux container:
+
+```bash
+# Build manylinux wheel in Docker
+docker run --rm -v $(pwd):/io ghcr.io/pyo3/maturin build --release
+
+# Cross-compile for a specific target
+maturin build --release --target aarch64-unknown-linux-gnu
+```
+
+### Publish to PyPI
+
+```bash
+maturin publish              # Build and upload to PyPI
+maturin publish --repository testpypi   # Test first on TestPyPI
+```
+
+Requires a PyPI account and token (`MATURIN_PYPI_TOKEN` environment variable or `~/.pypirc`).
+
+### Platform matrix
+
+For multi-platform distribution, use CI (e.g. GitHub Actions) to build wheels for each target:
+
+| Platform | Target |
+|----------|--------|
+| Linux x86_64 | `x86_64-unknown-linux-gnu` (manylinux) |
+| Linux aarch64 | `aarch64-unknown-linux-gnu` |
+| macOS x86_64 | `x86_64-apple-darwin` |
+| macOS ARM | `aarch64-apple-darwin` |
+| Windows x86_64 | `x86_64-pc-windows-msvc` |
+
+Each wheel embeds the compiled Rust extension — end users only need `pip install` with no Rust toolchain.
 
 ## License
 
