@@ -1,8 +1,10 @@
 mod metadata;
 mod storage;
+mod workspace;
 
 pub use metadata::RepoMetadata;
 pub use storage::ChunkStorage;
+pub use workspace::{Workspace, DEFAULT_REPO_NAME};
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -410,7 +412,7 @@ impl LogRepo {
     }
 }
 
-fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
+pub(crate) fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::engine::{CollectResult, Collector};
 use crate::operator::Operation;
-use crate::repo::LogRepo;
+use crate::repo::{LogRepo, Workspace};
 
 /// Python wrapper for LogRepo.
 #[pyclass(name = "LogRepo")]
@@ -488,5 +488,98 @@ impl PyLogStats {
             "LogStats(lines={}, bytes={}, avg_len={:.1}, chunks={})",
             self.total_lines, self.total_bytes, self.avg_line_len, self.chunk_count
         )
+    }
+}
+
+/// Python wrapper for Workspace — manages multiple named repos.
+#[pyclass(name = "Workspace")]
+pub struct PyWorkspace {
+    inner: Workspace,
+}
+
+#[pymethods]
+impl PyWorkspace {
+    /// Open (or initialize) a workspace at the given root directory.
+    #[new]
+    fn new(root: &str) -> PyResult<Self> {
+        let ws = Workspace::open(&PathBuf::from(root))?;
+        ws.migrate_if_needed()?;
+        Ok(Self { inner: ws })
+    }
+
+    /// Whether the workspace has been initialized.
+    fn is_initialized(&self) -> bool {
+        self.inner.is_initialized()
+    }
+
+    /// List all repo names.
+    fn list(&self) -> PyResult<Vec<String>> {
+        Ok(self.inner.list()?)
+    }
+
+    /// Get the active repo name.
+    fn active(&self) -> PyResult<String> {
+        Ok(self.inner.active()?)
+    }
+
+    /// Set the active repo name.
+    fn set_active(&self, name: &str) -> PyResult<()> {
+        Ok(self.inner.set_active(name)?)
+    }
+
+    /// Check if a named repo exists.
+    fn has_repo(&self, name: &str) -> bool {
+        self.inner.has_repo(name)
+    }
+
+    /// Open a named repo.
+    fn open_repo(&self, name: &str) -> PyResult<PyLogRepo> {
+        Ok(PyLogRepo {
+            inner: self.inner.open_repo(name)?,
+        })
+    }
+
+    /// Open the currently active repo.
+    fn open_active(&self) -> PyResult<PyLogRepo> {
+        Ok(PyLogRepo {
+            inner: self.inner.open_active()?,
+        })
+    }
+
+    /// Import a file into a new named repo.
+    #[pyo3(signature = (source_file, name="default"))]
+    fn import_file(&self, source_file: &str, name: &str) -> PyResult<PyLogRepo> {
+        Ok(PyLogRepo {
+            inner: self
+                .inner
+                .import_file(name, &PathBuf::from(source_file))?,
+        })
+    }
+
+    /// Import text into a new named repo.
+    #[pyo3(signature = (text, source_name, name="default"))]
+    fn import_text(&self, text: &str, source_name: &str, name: &str) -> PyResult<PyLogRepo> {
+        Ok(PyLogRepo {
+            inner: self
+                .inner
+                .import_bytes(name, text.as_bytes(), source_name.to_string())?,
+        })
+    }
+
+    /// Clone a repo under a new name.
+    fn clone_repo(&self, src: &str, dst: &str) -> PyResult<PyLogRepo> {
+        Ok(PyLogRepo {
+            inner: self.inner.clone_repo(src, dst)?,
+        })
+    }
+
+    /// Remove a named repo.
+    fn remove_repo(&self, name: &str) -> PyResult<()> {
+        Ok(self.inner.remove_repo(name)?)
+    }
+
+    /// Workspace root path.
+    fn root(&self) -> String {
+        self.inner.root().to_string_lossy().to_string()
     }
 }
