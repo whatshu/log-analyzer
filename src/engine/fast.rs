@@ -3,7 +3,6 @@
 //! Uses SIMD-accelerated literal optimizations from the ripgrep ecosystem
 //! for searching through raw (uncompressed) data and decompressed chunks.
 
-use std::io::Cursor;
 use std::path::Path;
 
 use grep_regex::RegexMatcher;
@@ -67,6 +66,7 @@ pub fn search_file(
 
 /// Count matching lines across compressed chunks using ripgrep's searcher.
 /// Each chunk is decompressed and searched with grep-searcher's SIMD path.
+/// Uses parallel decompress + search with rayon try_reduce.
 pub fn count_chunk_matches(
     storage: &ChunkStorage,
     index: &LineIndex,
@@ -77,21 +77,20 @@ pub fn count_chunk_matches(
 
     let total_chunks = index.chunks.len();
 
-    // Process chunks in parallel using rayon, but search each chunk with grep-searcher
     use rayon::prelude::*;
-    let results: Vec<Result<usize>> = (0..total_chunks)
+    (0..total_chunks)
         .into_par_iter()
         .map(|chunk_idx| {
             let chunk_info = &index.chunks[chunk_idx];
             let chunk_data = storage.read_chunk(chunk_info.id)?;
 
             let mut count = 0usize;
-            let mut searcher = SearcherBuilder::new().line_number(true).build();
-
-            searcher
-                .search_reader(
+            SearcherBuilder::new()
+                .line_number(true)
+                .build()
+                .search_slice(
                     &matcher,
-                    Cursor::new(&chunk_data),
+                    &chunk_data,
                     UTF8(|_, _| {
                         count += 1;
                         Ok(true)
@@ -101,13 +100,7 @@ pub fn count_chunk_matches(
 
             Ok(count)
         })
-        .collect();
-
-    let mut total = 0;
-    for r in results {
-        total += r?;
-    }
-    Ok(total)
+        .try_reduce(|| 0, |a, b| Ok(a + b))
 }
 
 /// Search compressed chunks for matching lines using grep-searcher.
@@ -128,12 +121,12 @@ pub fn search_chunks(
         let chunk_info = &index.chunks[chunk_idx];
         let chunk_data = storage.read_chunk(chunk_info.id)?;
 
-        let mut searcher = SearcherBuilder::new().line_number(true).build();
-
-        searcher
-            .search_reader(
+        SearcherBuilder::new()
+            .line_number(true)
+            .build()
+            .search_slice(
                 &matcher,
-                Cursor::new(&chunk_data),
+                &chunk_data,
                 UTF8(|lnum, line| {
                     let global_line = chunk_info.line_start + (lnum as usize - 1);
                     results.push((global_line, line.trim_end_matches('\n').to_string()));

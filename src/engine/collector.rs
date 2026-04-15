@@ -24,7 +24,6 @@ use crate::error::Result;
 use crate::index::LineIndex;
 use crate::repo::ChunkStorage;
 
-use super::read_chunk_lines;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -329,8 +328,24 @@ impl Acc {
 // Execution: run a collector over chunked storage
 // ---------------------------------------------------------------------------
 
+/// Iterate over lines in raw chunk bytes without allocating Strings.
+/// Calls `f` with each line as a &str (zero-copy from the decompressed buffer).
+#[inline]
+fn for_each_line_in_chunk(chunk_data: &[u8], mut f: impl FnMut(&str)) {
+    // chunk data has lines separated by \n; last line may or may not end with \n
+    let text = unsafe { std::str::from_utf8_unchecked(chunk_data) };
+    for line in text.split('\n') {
+        if !line.is_empty() {
+            f(line);
+        }
+    }
+}
+
 /// Execute a collector over the original log data, chunk-by-chunk in parallel.
 /// Does **not** modify the repository.
+///
+/// Optimized: decompresses each chunk and iterates over raw bytes without
+/// allocating a Vec<String>. Uses rayon parallel map + reduce.
 pub fn execute(
     collector: &Collector,
     storage: &ChunkStorage,
@@ -356,26 +371,30 @@ pub fn execute(
 
     let total_chunks = index.chunks.len();
 
-    // Parallel map: each chunk → its own Acc
-    let accs: Vec<Result<Acc>> = (0..total_chunks)
+    // Parallel map + reduce: each chunk → Acc, then merge
+    let combined: Result<Acc> = (0..total_chunks)
         .into_par_iter()
         .map(|chunk_idx| {
-            let lines = read_chunk_lines(storage, index, chunk_idx)?;
+            let chunk_info = &index.chunks[chunk_idx];
+            let chunk_data = storage.read_chunk(chunk_info.id)?;
             let mut acc = Acc::new(collector);
-            for line in &lines {
+
+            // Zero-copy line iteration over decompressed bytes
+            for_each_line_in_chunk(&chunk_data, |line| {
                 acc.accumulate(line, re.as_ref(), group_index);
-            }
+            });
+
             Ok(acc)
         })
-        .collect();
+        .try_reduce(
+            || Acc::new(collector),
+            |mut a, b| {
+                a.merge(b);
+                Ok(a)
+            },
+        );
 
-    // Sequential reduce (merge)
-    let mut combined = Acc::new(collector);
-    for acc in accs {
-        combined.merge(acc?);
-    }
-
-    Ok(combined.finish(collector))
+    Ok(combined?.finish(collector))
 }
 
 // ---------------------------------------------------------------------------

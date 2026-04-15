@@ -10,7 +10,6 @@ use crate::error::Result;
 use crate::index::LineIndex;
 use crate::repo::ChunkStorage;
 
-use super::read_chunk_lines;
 
 /// Progress callback: (chunks_processed, total_chunks)
 pub type ProgressCallback = Box<dyn Fn(usize, usize) + Send + Sync>;
@@ -38,15 +37,15 @@ impl<'a> ChunkedProcessor<'a> {
         let re = Regex::new(pattern)?;
         let total_chunks = self.index.chunks.len();
 
-        let count: Result<usize> = (0..total_chunks)
+        (0..total_chunks)
             .into_par_iter()
             .map(|chunk_idx| {
-                let lines = read_chunk_lines(self.storage, self.index, chunk_idx)?;
-                Ok(lines.iter().filter(|l| re.is_match(l)).count())
+                let chunk_info = &self.index.chunks[chunk_idx];
+                let chunk_data = self.storage.read_chunk(chunk_info.id)?;
+                let text = unsafe { std::str::from_utf8_unchecked(&chunk_data) };
+                Ok(text.split('\n').filter(|l| !l.is_empty() && re.is_match(l)).count())
             })
-            .try_reduce(|| 0, |a, b| Ok(a + b));
-
-        count
+            .try_reduce(|| 0, |a, b| Ok(a + b))
     }
 
     /// Stream-filter lines matching a regex directly to an output file.
@@ -66,9 +65,14 @@ impl<'a> ChunkedProcessor<'a> {
         let mut writer = BufWriter::with_capacity(256 * 1024, file);
 
         for chunk_idx in 0..total_chunks {
-            let lines = read_chunk_lines(self.storage, self.index, chunk_idx)?;
+            let chunk_info = &self.index.chunks[chunk_idx];
+            let chunk_data = self.storage.read_chunk(chunk_info.id)?;
+            let text = unsafe { std::str::from_utf8_unchecked(&chunk_data) };
 
-            for line in &lines {
+            for line in text.split('\n') {
+                if line.is_empty() {
+                    continue;
+                }
                 if re.is_match(line) == keep {
                     writer.write_all(line.as_bytes())?;
                     writer.write_all(b"\n")?;
@@ -86,7 +90,6 @@ impl<'a> ChunkedProcessor<'a> {
     }
 
     /// Stream-replace matching text and write directly to an output file.
-    /// Uses parallel chunk processing with ordered output via channels.
     pub fn replace_to_file(
         &self,
         pattern: &str,
@@ -99,40 +102,23 @@ impl<'a> ChunkedProcessor<'a> {
         let replacement = replacement.to_string();
         let modified_count = Arc::new(AtomicUsize::new(0));
 
-        // For ordered output, process sequentially but parallelize within chunks
         let file = std::fs::File::create(output)?;
         let mut writer = BufWriter::with_capacity(256 * 1024, file);
 
         for chunk_idx in 0..total_chunks {
-            let lines = read_chunk_lines(self.storage, self.index, chunk_idx)?;
+            let chunk_info = &self.index.chunks[chunk_idx];
+            let chunk_data = self.storage.read_chunk(chunk_info.id)?;
+            let text = unsafe { std::str::from_utf8_unchecked(&chunk_data) };
 
-            // Parallel replace within chunk
-            let results: Vec<String> = if lines.len() > 1000 {
-                lines
-                    .into_par_iter()
-                    .map(|line| {
-                        let replaced = re.replace_all(&line, replacement.as_str()).into_owned();
-                        if replaced != line {
-                            modified_count.fetch_add(1, Ordering::Relaxed);
-                        }
-                        replaced
-                    })
-                    .collect()
-            } else {
-                lines
-                    .into_iter()
-                    .map(|line| {
-                        let replaced = re.replace_all(&line, replacement.as_str()).into_owned();
-                        if replaced != line {
-                            modified_count.fetch_add(1, Ordering::Relaxed);
-                        }
-                        replaced
-                    })
-                    .collect()
-            };
-
-            for line in &results {
-                writer.write_all(line.as_bytes())?;
+            for line in text.split('\n') {
+                if line.is_empty() {
+                    continue;
+                }
+                let replaced = re.replace_all(line, replacement.as_str());
+                if replaced != line {
+                    modified_count.fetch_add(1, Ordering::Relaxed);
+                }
+                writer.write_all(replaced.as_bytes())?;
                 writer.write_all(b"\n")?;
             }
 
@@ -158,16 +144,22 @@ impl<'a> ChunkedProcessor<'a> {
 
         for chunk_idx in 0..total_chunks {
             let chunk_info = &self.index.chunks[chunk_idx];
-            let lines = read_chunk_lines(self.storage, self.index, chunk_idx)?;
+            let chunk_data = self.storage.read_chunk(chunk_info.id)?;
+            let text = unsafe { std::str::from_utf8_unchecked(&chunk_data) };
 
-            for (i, line) in lines.iter().enumerate() {
+            let mut line_in_chunk = 0usize;
+            for line in text.split('\n') {
+                if line.is_empty() {
+                    continue;
+                }
                 if re.is_match(line) {
-                    let global_line = chunk_info.line_start + i;
-                    results.push((global_line, line.clone()));
+                    let global_line = chunk_info.line_start + line_in_chunk;
+                    results.push((global_line, line.to_string()));
                     if results.len() >= max_results {
                         return Ok(results);
                     }
                 }
+                line_in_chunk += 1;
             }
         }
 
@@ -195,15 +187,21 @@ impl<'a> ChunkedProcessor<'a> {
                 }
 
                 let chunk_info = &self.index.chunks[chunk_idx];
-                let lines = read_chunk_lines(self.storage, self.index, chunk_idx)?;
+                let chunk_data = self.storage.read_chunk(chunk_info.id)?;
+                let text = unsafe { std::str::from_utf8_unchecked(&chunk_data) };
 
                 let mut matches = Vec::new();
-                for (i, line) in lines.iter().enumerate() {
+                let mut line_in_chunk = 0usize;
+                for line in text.split('\n') {
+                    if line.is_empty() {
+                        continue;
+                    }
                     if re.is_match(line) {
-                        let global_line = chunk_info.line_start + i;
-                        matches.push((global_line, line.clone()));
+                        let global_line = chunk_info.line_start + line_in_chunk;
+                        matches.push((global_line, line.to_string()));
                         found_count.fetch_add(1, Ordering::Relaxed);
                     }
+                    line_in_chunk += 1;
                 }
                 Ok(matches)
             })
@@ -232,12 +230,11 @@ impl<'a> ChunkedProcessor<'a> {
         let mut writer = BufWriter::with_capacity(256 * 1024, file);
 
         for chunk_idx in 0..total_chunks {
-            let lines = read_chunk_lines(self.storage, self.index, chunk_idx)?;
-            for line in &lines {
-                writer.write_all(line.as_bytes())?;
-                writer.write_all(b"\n")?;
-                total_lines += 1;
-            }
+            let chunk_info = &self.index.chunks[chunk_idx];
+            let chunk_data = self.storage.read_chunk(chunk_info.id)?;
+            // Write raw chunk data directly — it already has newlines
+            writer.write_all(&chunk_data)?;
+            total_lines += chunk_info.line_count;
 
             if let Some(ref cb) = progress {
                 cb(chunk_idx + 1, total_chunks);
@@ -255,10 +252,22 @@ impl<'a> ChunkedProcessor<'a> {
         let chunk_stats: Vec<Result<(usize, usize, usize)>> = (0..total_chunks)
             .into_par_iter()
             .map(|chunk_idx| {
-                let lines = read_chunk_lines(self.storage, self.index, chunk_idx)?;
-                let total_bytes: usize = lines.iter().map(|l| l.len()).sum();
-                let max_len = lines.iter().map(|l| l.len()).max().unwrap_or(0);
-                let min_len = lines.iter().map(|l| l.len()).min().unwrap_or(0);
+                let chunk_info = &self.index.chunks[chunk_idx];
+                let chunk_data = self.storage.read_chunk(chunk_info.id)?;
+                let text = unsafe { std::str::from_utf8_unchecked(&chunk_data) };
+                let mut total_bytes = 0usize;
+                let mut max_len = 0usize;
+                let mut min_len = usize::MAX;
+                for line in text.split('\n') {
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let len = line.len();
+                    total_bytes += len;
+                    if len > max_len { max_len = len; }
+                    if len < min_len { min_len = len; }
+                }
+                if min_len == usize::MAX { min_len = 0; }
                 Ok((total_bytes, max_len, min_len))
             })
             .collect();
