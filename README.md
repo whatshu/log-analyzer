@@ -2,7 +2,7 @@
 
 [中文文档](README_zh.md)
 
-A high-performance log analysis tool built with a **Rust** backend and **Python** CLI frontend. Designed for text log files exceeding **10 GB**, it stores logs in compressed repositories with a full operation history and undo support.
+A high-performance log analysis tool built with a **Rust** backend and **Python** CLI frontend. Designed for text log files exceeding **10 GB**, it stores logs in compressed repositories with a full operation history and undo support. Uses [ripgrep](https://github.com/BurntSushi/ripgrep)'s SIMD-accelerated search engine internally.
 
 ## Features
 
@@ -11,19 +11,32 @@ A high-performance log analysis tool built with a **Rust** backend and **Python*
 - **Git-like repositories** — Each repository maintains an operation journal. Repositories can be cloned for parallel analysis branches.
 - **Streaming engine** — Filter, replace, search, and collect statistics chunk-by-chunk without loading the entire file into memory.
 - **Collectors** — Read-only terminal operations (inspired by Java Stream Collectors) for aggregation: count, group-by, top-N, unique values, numeric statistics.
+- **ripgrep-powered search** — Pattern matching uses [grep-searcher](https://crates.io/crates/grep-searcher) with SIMD literal optimizations from the ripgrep ecosystem.
 - **Multi-threaded** — Parallel chunk processing via [rayon](https://github.com/rayon-rs/rayon) for indexing, filtering, searching, and collecting.
 - **Append** — Incrementally add new log data to an existing repository without re-importing.
 - **Python API** — Full Rust functionality exposed to Python via [PyO3](https://pyo3.rs), usable both as a library and through the CLI.
 
-## Installation
+## Building
 
-Requires Python >= 3.10 and Rust toolchain (for building the native extension).
+Requires **Python >= 3.10** and **Rust toolchain** (rustc + cargo).
+
+A `build.sh` script is provided for all build tasks:
 
 ```bash
-pip install -e ".[dev]"
+./build.sh                    # Build release wheel only (no install)
+./build.sh --dev              # Build debug wheel only
+./build.sh install            # Build release wheel and install
+./build.sh install --dev      # Editable development install (rebuilds on Rust changes)
+./build.sh uninstall          # Remove installed package
+./build.sh test               # Install and run full test suite
 ```
 
-This uses [maturin](https://github.com/PyO3/maturin) to compile the Rust core and install the `log-analyzer` CLI.
+Or manually:
+
+```bash
+pip install -e ".[dev]"       # Editable install (uses maturin)
+maturin build --release       # Build .whl to target/wheels/
+```
 
 ## Quick Start
 
@@ -110,6 +123,10 @@ repo.stream_search("ERROR", max_results=100)          # -> [(line_num, content),
 repo.stream_filter_to_file("ERROR", True, "err.log")  # write matches to file
 repo.count_matches("ERROR")                            # count without loading all data
 
+# Search files directly without importing (ripgrep-powered)
+LogRepo.count_file_matches("server.log", "ERROR")     # -> 4821
+LogRepo.search_file("server.log", "ERROR", 10)        # -> [(line_num, content), ...]
+
 # Export and clone
 repo.export("output.log")
 cloned = repo.clone_to("./repo_copy")
@@ -117,30 +134,30 @@ cloned = repo.clone_to("./repo_copy")
 
 ## Examples
 
-### Analyzing a 900 MB JSON log
+### Analyzing a large JSON log
 
 ```python
 from log_analyzer import LogRepo
 
-repo = LogRepo.import_file(".logrepo", "log/log.json")
+repo = LogRepo.import_file(".logrepo", "access.log")
 
-# Count "sending" messages
-sending = repo.collect_count("sending")
+# Count specific messages
+errors = repo.collect_count("ERROR")
 total = repo.metadata().original_line_count
-print(f"sending: {sending:,} / {total:,} ({sending/total*100:.1f}%)")
+print(f"errors: {errors:,} / {total:,} ({errors/total*100:.1f}%)")
 
-# Break down by target
-targets = repo.collect_group_count(r"sending to legacy (\w+)", 1)
-for target, count in sorted(targets.items(), key=lambda x: -x[1]):
-    print(f"  -> {target}: {count:,}")
+# Group by log level
+levels = repo.collect_group_count(r"\[(\w+)\]", 1)
+for level, count in sorted(levels.items(), key=lambda x: -x[1]):
+    print(f"  {level}: {count:,}")
 
 # Top 10 clients
 for client_id, count in repo.collect_top_n(r"clientId=(\d+)", 1, 10):
     print(f"  clientId={client_id}: {count:,}")
 
-# Payload size statistics
-stats = repo.collect_numeric_stats(r"payloadLen=(\d+)", 1)
-print(f"payloadLen: min={stats['min']:.0f} max={stats['max']:.0f} avg={stats['avg']:.1f}")
+# Response time statistics
+stats = repo.collect_numeric_stats(r"latency=(\d+)ms", 1)
+print(f"latency: min={stats['min']:.0f} max={stats['max']:.0f} avg={stats['avg']:.1f}")
 ```
 
 ### Concatenating split log files
@@ -179,36 +196,87 @@ log-analyzer replace 'user=\w+' 'user=REDACTED'
 log-analyzer export anonymized.log
 ```
 
-## Architecture
+## Benchmarks
+
+Tested on a 897 MB log file (2.15 million lines). One-time import: **~550 ms**.
+
+Run the benchmark yourself: `python3 benchmarks/bench.py [LOG_FILE]`
+
+### Performance comparison
+
+| Task | grep | ripgrep | sed | awk | Python | log-analyzer |
+|------|------|---------|-----|-----|--------|--------------|
+| Count matches | 200 ms | **116 ms** | — | 701 ms | 327 ms | 178 ms |
+| Filter to file | 275 ms | **181 ms** | — | 750 ms | 405 ms | 557 ms |
+| Regex replace | — | 948 ms | **640 ms** | — | 7.17 s | 967 ms |
+| Group-by count | — | 1.26 s* | — | — | 938 ms | **250 ms** |
+
+*\* rg \| sort \| uniq -c pipeline*
+
+**Key takeaways:**
+
+- **Counting/searching**: log-analyzer is 1.5x ripgrep (uses ripgrep's grep-searcher internally), faster than grep, awk, and Python.
+- **Regex replace**: On par with sed and ripgrep; 7x faster than Python.
+- **Aggregation (group-by, top-N, stats)**: **log-analyzer is fastest** — 3.7x faster than Python, 5x faster than rg|sort|uniq pipe. This is the core advantage over Unix tools.
+- **Filter to file**: ripgrep and grep are faster for raw file-to-file filtering since they avoid decompression overhead.
+
+### Usability comparison
+
+| Feature | grep/rg/sed/awk | log-analyzer |
+|---------|-----------------|--------------|
+| Count matches | `grep -c` / `rg -c` | `collect_count(pattern)` |
+| Filter to file | `grep pattern > out` | `stream_filter_to_file()` |
+| Regex replace | `sed -E 's/.../.../'` | `stream_replace_to_file()` |
+| Group-by counting | `rg \| sort \| uniq -c` | `collect_group_count()` |
+| Top-N frequency | `... \| sort \| head -N` | `collect_top_n()` |
+| Numeric stats | awk (manual script) | `collect_numeric_stats()` |
+| Undo last operation | not possible | `undo()` |
+| Operation history | not possible | `history()` |
+| Compressed storage | no (raw files) | zstd chunks |
+| Append / concat files | `cat >> file` | `append_file()` |
+| Branching analysis | `cp -r` + manual | `clone_to()` |
+| Random line access | `sed -n 'Np'` (slow) | `read_line(N)` (indexed) |
+| Python API | subprocess only | native import |
+
+## Project Structure
 
 ```
-src/                        Rust core (compiled to Python extension via PyO3)
-├── lib.rs                  PyO3 module entry
-├── bindings.rs             Python class/method bindings
-├── error.rs                Error types
-├── repo/                   Log repository
-│   ├── mod.rs              LogRepo: create, open, append, operations, undo
-│   ├── storage.rs          ChunkStorage: zstd compressed chunk I/O
-│   └── metadata.rs         RepoMetadata: UUID, timestamps, stats
-├── index/                  Line indexing
-│   ├── mod.rs              LineIndex: chunk-based line lookup
-│   └── builder.rs          IndexBuilder: parallel newline scanning
-├── operator/               Reversible operators
-│   ├── mod.rs              Operation enum, InverseData, dispatch
-│   ├── filter.rs           Regex filter (keep/remove)
-│   ├── replace.rs          Regex replace with capture groups
-│   └── crud.rs             DeleteLines, InsertLines, ModifyLine
-└── engine/                 Streaming processing engine
-    ├── mod.rs              Shared chunk reading utilities
-    ├── stream.rs           LineStream: chunk-by-chunk iterator
-    ├── processor.rs        ChunkedProcessor: streaming filter/replace/search
-    └── collector.rs        Collector: count, group_count, top_n, unique, numeric_stats
-
-python/log_analyzer/        Python package
-├── __init__.py             Re-exports LogRepo, RepoMetadata, OperationRecord
-└── cli.py                  Click CLI (import, append, view, filter, replace, ...)
-
-tests/                      Test suite (61 Rust + 85 Python = 146 tests)
+log-analyzer/
+├── build.sh                Build/install/uninstall script
+├── Cargo.toml              Rust package config
+├── pyproject.toml          Python package config (maturin)
+│
+├── src/                    Rust core (compiled to Python extension via PyO3)
+│   ├── lib.rs              PyO3 module entry
+│   ├── bindings.rs         Python class/method bindings
+│   ├── error.rs            Error types
+│   ├── repo/               Log repository
+│   │   ├── mod.rs          LogRepo: create, open, append, operations, undo
+│   │   ├── storage.rs      ChunkStorage: zstd compressed chunk I/O
+│   │   └── metadata.rs     RepoMetadata: UUID, timestamps, stats
+│   ├── index/              Line indexing
+│   │   ├── mod.rs          LineIndex: chunk-based line lookup
+│   │   └── builder.rs      IndexBuilder: parallel newline scanning
+│   ├── operator/           Reversible operators
+│   │   ├── mod.rs          Operation enum, InverseData, dispatch
+│   │   ├── filter.rs       Regex filter (keep/remove)
+│   │   ├── replace.rs      Regex replace with capture groups
+│   │   └── crud.rs         DeleteLines, InsertLines, ModifyLine
+│   └── engine/             Streaming processing engine
+│       ├── mod.rs          Shared chunk reading utilities
+│       ├── fast.rs         ripgrep-powered SIMD search (grep-searcher)
+│       ├── stream.rs       LineStream: chunk-by-chunk iterator
+│       ├── processor.rs    ChunkedProcessor: streaming filter/replace/search
+│       └── collector.rs    Collector: count, group_count, top_n, unique, numeric_stats
+│
+├── python/log_analyzer/    Python package
+│   ├── __init__.py         Re-exports LogRepo, RepoMetadata, OperationRecord
+│   └── cli.py              Click CLI (import, append, view, filter, replace, ...)
+│
+├── tests/                  Test suite (67 Rust + 85 Python = 152 tests)
+├── benchmarks/             Performance benchmarks
+│   └── bench.py            Comparison vs grep, rg, sed, awk, Python
+└── .claude/                AI agent skills
 ```
 
 ### Repository layout on disk
@@ -227,14 +295,9 @@ tests/                      Test suite (61 Rust + 85 Python = 146 tests)
 ## Testing
 
 ```bash
-# Rust tests (unit + integration)
-cargo test
-
-# Python tests (unit + integration + scenario)
-pytest tests/ -v
-
-# All tests
-cargo test && pytest tests/ -v
+cargo test                  # Rust tests (67 tests)
+pytest tests/ -v            # Python tests (85 tests)
+./build.sh test             # Build, install, and run all tests
 ```
 
 ## License

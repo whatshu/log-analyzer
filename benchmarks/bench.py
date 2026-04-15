@@ -251,19 +251,37 @@ separator()
 # Task 4: Group-count (unique values of a field)
 # ---------------------------------------------------------------------------
 
-TASK4 = 'group count by __SOURCE__'
+# Auto-detect a suitable group-by field from the first line
+GROUP_PAT = None
+GROUP_RG_PAT = None
+with open(LOG_FILE) as f:
+    first_line = f.readline()
+    # Try common JSON field patterns
+    for field in ["__SOURCE__", "level", "status", "host", "source"]:
+        test_pat = f'"{field}":"([^"]+)"'
+        if _re.search(test_pat, first_line):
+            GROUP_PAT = test_pat
+            GROUP_RG_PAT = f'"{field}":"([^"]+)"'
+            TASK4 = f'group count by {field}'
+            break
+    if GROUP_PAT is None:
+        # Fallback: group by first word
+        GROUP_PAT = r"^(\S+)"
+        GROUP_RG_PAT = r"^(\S+)"
+        TASK4 = "group count by first token"
+
 print(f"\n=== Task 4: {TASK4} ===")
 
-if HAVE_AWK:
+if HAVE_RG:
     t, out = run_shell(
-        f"""rg -oP '"__SOURCE__":"([^"]+)"' -r '$1' "{LOG_FILE}" | sort | uniq -c | sort -rn"""
+        f"""rg -oP '{GROUP_RG_PAT}' -r '$1' "{LOG_FILE}" | sort | uniq -c | sort -rn"""
     )
     results.append(Result("rg|sort|uniq", TASK4, t))
     print(f"  rg|sort|uniq -c:  {fmt(t)}")
 
 def py_group():
     from collections import Counter
-    pat = _re.compile(r'"__SOURCE__":"([^"]+)"')
+    pat = _re.compile(GROUP_PAT)
     c = Counter()
     with open(LOG_FILE) as f:
         for line in f:
@@ -276,7 +294,7 @@ t, out = run_python(py_group)
 results.append(Result("python", TASK4, t))
 print(f"  python Counter:   {fmt(t)}")
 
-t, out = run_python(lambda: repo.collect_group_count(r'"__SOURCE__":"([^"]+)"', 1))
+t, out = run_python(lambda: repo.collect_group_count(GROUP_PAT, 1))
 results.append(Result("log-analyzer", TASK4, t))
 print(f"  log-analyzer:     {fmt(t)}")
 

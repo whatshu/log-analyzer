@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-高性能日志分析工具，**Rust** 后端 + **Python** CLI 前端。面向 **10GB+** 的文本日志文件设计，将日志存储在压缩仓库中，支持完整的操作历史和撤销。
+高性能日志分析工具，**Rust** 后端 + **Python** CLI 前端。面向 **10GB+** 的文本日志文件设计，将日志存储在压缩仓库中，支持完整的操作历史和撤销。内部使用 [ripgrep](https://github.com/BurntSushi/ripgrep) 的 SIMD 加速搜索引擎。
 
 ## 特性
 
@@ -11,19 +11,32 @@
 - **Git 风格仓库** — 每个仓库维护操作日志。仓库可克隆，用于并行分析分支。
 - **流式引擎** — 逐块过滤、替换、搜索和统计，无需将整个文件加载到内存。
 - **收集器 (Collector)** — 只读终端操作（参考 Java Stream Collectors），用于聚合：计数、分组、Top-N、去重、数值统计。
+- **ripgrep 加速搜索** — 模式匹配使用 [grep-searcher](https://crates.io/crates/grep-searcher)，具备 ripgrep 生态的 SIMD 字面量优化。
 - **多线程** — 通过 [rayon](https://github.com/rayon-rs/rayon) 并行处理块：索引构建、过滤、搜索、收集。
 - **追加** — 向现有仓库增量添加新日志数据，无需重新导入。
 - **Python API** — 通过 [PyO3](https://pyo3.rs) 将完整 Rust 功能暴露给 Python，可作为库使用也可通过 CLI 调用。
 
-## 安装
+## 构建
 
-需要 Python >= 3.10 和 Rust 工具链。
+需要 **Python >= 3.10** 和 **Rust 工具链**（rustc + cargo）。
+
+提供 `build.sh` 脚本用于所有构建任务：
 
 ```bash
-pip install -e ".[dev]"
+./build.sh                    # 仅编译 release wheel（不安装）
+./build.sh --dev              # 仅编译 debug wheel
+./build.sh install            # 编译 release 并安装
+./build.sh install --dev      # 可编辑开发模式安装
+./build.sh uninstall          # 卸载
+./build.sh test               # 安装并运行全部测试
 ```
 
-使用 [maturin](https://github.com/PyO3/maturin) 编译 Rust 核心并安装 `log-analyzer` CLI。
+或手动：
+
+```bash
+pip install -e ".[dev]"       # 可编辑安装（使用 maturin）
+maturin build --release       # 构建 .whl 到 target/wheels/
+```
 
 ## 快速开始
 
@@ -122,25 +135,25 @@ cloned = repo.clone_to("./repo_copy")
 ```python
 from log_analyzer import LogRepo
 
-repo = LogRepo.import_file(".logrepo", "log/log.json")
+repo = LogRepo.import_file(".logrepo", "access.log")
 
-# 统计 "sending" 消息
-sending = repo.collect_count("sending")
+# 统计错误
+errors = repo.collect_count("ERROR")
 total = repo.metadata().original_line_count
-print(f"sending: {sending:,} / {total:,} ({sending/total*100:.1f}%)")
+print(f"errors: {errors:,} / {total:,} ({errors/total*100:.1f}%)")
 
-# 按目标分组
-targets = repo.collect_group_count(r"sending to legacy (\w+)", 1)
-for target, count in sorted(targets.items(), key=lambda x: -x[1]):
-    print(f"  -> {target}: {count:,}")
+# 按日志级别分组
+levels = repo.collect_group_count(r"\[(\w+)\]", 1)
+for level, count in sorted(levels.items(), key=lambda x: -x[1]):
+    print(f"  {level}: {count:,}")
 
 # Top 10 客户端
 for client_id, count in repo.collect_top_n(r"clientId=(\d+)", 1, 10):
     print(f"  clientId={client_id}: {count:,}")
 
-# payloadLen 统计
-stats = repo.collect_numeric_stats(r"payloadLen=(\d+)", 1)
-print(f"payloadLen: min={stats['min']:.0f} max={stats['max']:.0f} avg={stats['avg']:.1f}")
+# 响应时间统计
+stats = repo.collect_numeric_stats(r"latency=(\d+)ms", 1)
+print(f"latency: min={stats['min']:.0f} max={stats['max']:.0f} avg={stats['avg']:.1f}")
 ```
 
 ### 拼接分段日志
@@ -179,53 +192,94 @@ log-analyzer replace 'user=\w+' 'user=REDACTED'
 log-analyzer export anonymized.log
 ```
 
-## 设计思路
+## 性能基准
 
-该项目最初的设计目标：
+测试文件：897 MB 日志（215 万行）。一次性导入：**~550 ms**。
 
-1. **日志仓** — 保存日志原文及元信息，使用压缩存储。支持复制，记录操作用于回退，参考 git 的实现。
-2. **操作符** — 应用于日志仓，所有操作符均可反向操作用于撤回。支持格式化语句和正则表达式，按行处理文本。
-3. **性能** — 面向 >10GB 文本日志，使用 Rust 多线程设计。参考 klogg 等高性能文本处理软件。
-4. **AI 优化** — 提供 Claude Code skills，便于 AI agent 使用。
+运行基准测试：`python3 benchmarks/bench.py [LOG_FILE]`
 
-## 架构
+### 性能对比
+
+| 任务 | grep | ripgrep | sed | awk | Python | log-analyzer |
+|------|------|---------|-----|-----|--------|--------------|
+| 计数匹配 | 200 ms | **116 ms** | — | 701 ms | 327 ms | 178 ms |
+| 过滤写文件 | 275 ms | **181 ms** | — | 750 ms | 405 ms | 557 ms |
+| 正则替换 | — | 948 ms | **640 ms** | — | 7.17 s | 967 ms |
+| 分组计数 | — | 1.26 s* | — | — | 938 ms | **250 ms** |
+
+*\* rg \| sort \| uniq -c 管道*
+
+**要点：**
+
+- **计数/搜索**：log-analyzer 约为 ripgrep 的 1.5 倍（内部使用 ripgrep 的 grep-searcher），快于 grep、awk、Python。
+- **正则替换**：与 sed、ripgrep 同级；比 Python 快 7 倍。
+- **聚合（分组、Top-N、统计）**：**log-analyzer 最快** — 比 Python 快 3.7 倍，比 rg|sort|uniq 管道快 5 倍。这是相对 Unix 工具的核心优势。
+
+### 易用性对比
+
+| 功能 | grep/rg/sed/awk | log-analyzer |
+|------|-----------------|--------------|
+| 计数匹配 | `grep -c` / `rg -c` | `collect_count(pattern)` |
+| 过滤写文件 | `grep pattern > out` | `stream_filter_to_file()` |
+| 正则替换 | `sed -E 's/.../.../'` | `stream_replace_to_file()` |
+| 分组计数 | `rg \| sort \| uniq -c` | `collect_group_count()` |
+| Top-N 频率 | `... \| sort \| head -N` | `collect_top_n()` |
+| 数值统计 | awk（手写脚本） | `collect_numeric_stats()` |
+| 撤销操作 | 不可能 | `undo()` |
+| 操作历史 | 不可能 | `history()` |
+| 压缩存储 | 无（原始文件） | zstd 分块 |
+| 追加/拼接文件 | `cat >> file` | `append_file()` |
+| 分支分析 | `cp -r` + 手动 | `clone_to()` |
+| 随机行访问 | `sed -n 'Np'`（慢） | `read_line(N)`（有索引） |
+| Python API | 仅 subprocess | 原生 import |
+
+## 项目结构
 
 ```
-src/                        Rust 核心（通过 PyO3 编译为 Python 扩展）
-├── lib.rs                  PyO3 模块入口
-├── bindings.rs             Python 类/方法绑定
-├── error.rs                错误类型
-├── repo/                   日志仓库
-│   ├── mod.rs              LogRepo：创建、打开、追加、操作、撤销
-│   ├── storage.rs          ChunkStorage：zstd 压缩块 I/O
-│   └── metadata.rs         RepoMetadata：UUID、时间戳、统计
-├── index/                  行索引
-│   ├── mod.rs              LineIndex：基于块的行查找
-│   └── builder.rs          IndexBuilder：并行换行符扫描
-├── operator/               可逆操作符
-│   ├── mod.rs              Operation 枚举、InverseData、分发
-│   ├── filter.rs           正则过滤（保留/移除）
-│   ├── replace.rs          正则替换（支持捕获组）
-│   └── crud.rs             DeleteLines、InsertLines、ModifyLine
-└── engine/                 流式处理引擎
-    ├── mod.rs              共享块读取工具
-    ├── stream.rs           LineStream：逐块迭代器
-    ├── processor.rs        ChunkedProcessor：流式过滤/替换/搜索
-    └── collector.rs        Collector：计数、分组、Top-N、去重、数值统计
-
-python/log_analyzer/        Python 包
-├── __init__.py             导出 LogRepo、RepoMetadata、OperationRecord
-└── cli.py                  Click CLI
-
-tests/                      测试套件（61 Rust + 85 Python = 146 个测试）
+log-analyzer/
+├── build.sh                构建/安装/卸载脚本
+├── Cargo.toml              Rust 包配置
+├── pyproject.toml          Python 包配置（maturin）
+│
+├── src/                    Rust 核心（通过 PyO3 编译为 Python 扩展）
+│   ├── lib.rs              PyO3 模块入口
+│   ├── bindings.rs         Python 类/方法绑定
+│   ├── error.rs            错误类型
+│   ├── repo/               日志仓库
+│   │   ├── mod.rs          LogRepo：创建、打开、追加、操作、撤销
+│   │   ├── storage.rs      ChunkStorage：zstd 压缩块 I/O
+│   │   └── metadata.rs     RepoMetadata：UUID、时间戳、统计
+│   ├── index/              行索引
+│   │   ├── mod.rs          LineIndex：基于块的行查找
+│   │   └── builder.rs      IndexBuilder：并行换行符扫描
+│   ├── operator/           可逆操作符
+│   │   ├── mod.rs          Operation 枚举、InverseData、分发
+│   │   ├── filter.rs       正则过滤（保留/移除）
+│   │   ├── replace.rs      正则替换（支持捕获组）
+│   │   └── crud.rs         DeleteLines、InsertLines、ModifyLine
+│   └── engine/             流式处理引擎
+│       ├── mod.rs          共享块读取工具
+│       ├── fast.rs         ripgrep 驱动的 SIMD 搜索（grep-searcher）
+│       ├── stream.rs       LineStream：逐块迭代器
+│       ├── processor.rs    ChunkedProcessor：流式过滤/替换/搜索
+│       └── collector.rs    Collector：计数、分组、Top-N、去重、数值统计
+│
+├── python/log_analyzer/    Python 包
+│   ├── __init__.py         导出 LogRepo、RepoMetadata、OperationRecord
+│   └── cli.py              Click CLI
+│
+├── tests/                  测试套件（67 Rust + 85 Python = 152 个测试）
+├── benchmarks/             性能基准测试
+│   └── bench.py            与 grep、rg、sed、awk、Python 对比
+└── .claude/                AI agent skills
 ```
 
 ## 测试
 
 ```bash
-cargo test                  # Rust 测试
-pytest tests/ -v            # Python 测试
-cargo test && pytest tests/ -v  # 全部
+cargo test                  # Rust 测试（67 个）
+pytest tests/ -v            # Python 测试（85 个）
+./build.sh test             # 构建、安装并运行全部测试
 ```
 
 ## 许可证
