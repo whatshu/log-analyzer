@@ -1,0 +1,35 @@
+# nfpm configuration — generates deb and rpm from a staged install.
+# This file is a template; build.sh substitutes __VERSION__ and __ARCH__ at build time.
+#
+# Usage (via build.sh):
+#   ./build.sh pkg          # build deb + rpm for current platform
+#   ./build.sh ci           # build wheels + deb + rpm
+
+name: log-analyzer
+arch: __ARCH__
+version: __VERSION__
+maintainer: log-analyzer contributors
+description: |
+  High-performance log analysis tool for large text files (>10GB).
+  Rust backend with zstd compression, ripgrep-powered search,
+  reversible operations, and Python CLI.
+vendor: log-analyzer
+homepage: https://github.com/log-analyzer/log-analyzer
+license: MIT
+
+depends:
+  - python3 >= 3.10
+
+contents:
+  # The self-contained virtualenv
+  - src: __STAGING__/opt/log-analyzer/
+    dst: /opt/log-analyzer/
+    type: tree
+
+  # CLI entry point symlink
+  - src: __STAGING__/usr/bin/log-analyzer
+    dst: /usr/bin/log-analyzer
+
+scripts:
+  postinstall: ""
+  preremove: ""

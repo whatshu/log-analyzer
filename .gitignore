@@ -9,4 +9,5 @@ build/
 .logrepo/
 *.zst
 .pytest_cache/
+.bin/
 log/

@@ -4,14 +4,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT_DIR"
 
+VERSION="0.1.0"
+
 # ---------- helpers ----------
 info()  { printf '\033[1;34m[INFO]\033[0m  %s\n' "$*"; }
 ok()    { printf '\033[1;32m[OK]\033[0m    %s\n' "$*"; }
 err()   { printf '\033[1;31m[ERR]\033[0m   %s\n' "$*" >&2; }
 
 # ---------- CI targets ----------
-# Each entry: "rust_target manylinux_arch"
-# maturin handles the Python ABI tags automatically.
 CI_TARGETS=(
     "x86_64-unknown-linux-gnu     x86_64"
     "aarch64-unknown-linux-gnu    aarch64"
@@ -45,7 +45,7 @@ check_prereqs() {
 
 # ---------- parse args ----------
 COMMAND=""
-MODE="release"      # dev | release
+MODE="release"
 RUN_TESTS=false
 
 usage() {
@@ -53,11 +53,12 @@ usage() {
 Usage: $0 [COMMAND] [OPTIONS]
 
 Commands:
-  (none)        Build only (default: release, current platform)
+  (none)        Build wheel only (default: release, current platform)
   install       Build and install
   uninstall     Remove installed package
   test          Run full test suite (build first if needed)
-  ci            Build release wheels for all supported platforms
+  pkg           Build deb + rpm packages for current platform
+  ci            Build all wheels + deb + rpm
 
 Options:
   --dev         Development/debug build
@@ -67,11 +68,11 @@ Options:
 
 Examples:
   $0                    Build release wheel (current platform)
-  $0 --dev              Build debug wheel
   $0 install            Build release and install
   $0 install --dev      Editable development install
-  $0 test               Build and run all tests
-  $0 ci                 Build wheels for all platforms via Docker/cross
+  $0 test               Build, install, and run all tests
+  $0 pkg                Build deb + rpm for current platform
+  $0 ci                 Build all platform wheels + deb + rpm
 EOF
     exit 0
 }
@@ -81,6 +82,7 @@ while [[ $# -gt 0 ]]; do
         install)   COMMAND="install";   shift ;;
         uninstall) COMMAND="uninstall"; shift ;;
         test)      COMMAND="test";      shift ;;
+        pkg)       COMMAND="pkg";       shift ;;
         ci)        COMMAND="ci";        shift ;;
         --dev)     MODE="dev";          shift ;;
         --release) MODE="release";      shift ;;
@@ -92,7 +94,7 @@ done
 
 check_prereqs
 
-# ---------- functions ----------
+# ---------- build ----------
 do_build() {
     if [[ "$MODE" == "dev" ]]; then
         info "Building debug..."
@@ -128,11 +130,97 @@ do_test() {
     ok "Python tests passed"
 }
 
+# ---------- package (deb + rpm) ----------
+ensure_nfpm() {
+    if command -v nfpm >/dev/null 2>&1; then
+        return 0
+    fi
+
+    info "nfpm not found. Installing..."
+    local nfpm_ver="2.41.1"
+    local arch
+    arch=$(uname -m)
+    case "$arch" in
+        x86_64)  arch="x86_64" ;;
+        aarch64) arch="arm64"  ;;
+        *) err "Unsupported architecture for nfpm: $arch"; return 1 ;;
+    esac
+
+    local url="https://github.com/goreleaser/nfpm/releases/download/v${nfpm_ver}/nfpm_${nfpm_ver}_linux_${arch}.tar.gz"
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    info "Downloading nfpm v${nfpm_ver}..."
+    curl -fsSL "$url" | tar xz -C "$tmp_dir" nfpm
+
+    # Install to project-local bin
+    mkdir -p "$ROOT_DIR/.bin"
+    mv "$tmp_dir/nfpm" "$ROOT_DIR/.bin/nfpm"
+    rm -rf "$tmp_dir"
+    export PATH="$ROOT_DIR/.bin:$PATH"
+    ok "nfpm installed to .bin/nfpm"
+}
+
+do_pkg() {
+    local dist_dir="$ROOT_DIR/dist"
+    mkdir -p "$dist_dir"
+
+    # Step 1: build the wheel
+    do_build
+
+    # Step 2: create a staging directory with a self-contained venv
+    local staging
+    staging=$(mktemp -d)
+    local venv_dir="$staging/opt/log-analyzer"
+
+    info "Creating self-contained virtualenv..."
+    python3 -m venv "$venv_dir"
+    "$venv_dir/bin/pip" install --quiet --upgrade pip
+    "$venv_dir/bin/pip" install --quiet "$WHEEL"
+
+    # Step 3: create CLI wrapper that uses the bundled venv
+    mkdir -p "$staging/usr/bin"
+    cat > "$staging/usr/bin/log-analyzer" <<'WRAPPER'
+#!/bin/sh
+exec /opt/log-analyzer/bin/python -m log_analyzer.cli "$@"
+WRAPPER
+    chmod +x "$staging/usr/bin/log-analyzer"
+
+    # Step 4: generate nfpm config from template
+    ensure_nfpm || { err "Cannot build packages without nfpm"; rm -rf "$staging"; return 1; }
+
+    local arch
+    arch=$(uname -m)
+
+    local nfpm_cfg="$staging/nfpm.yaml"
+    sed -e "s|__VERSION__|${VERSION}|g" \
+        -e "s|__ARCH__|${arch}|g" \
+        -e "s|__STAGING__|${staging}|g" \
+        "$ROOT_DIR/nfpm.yaml" > "$nfpm_cfg"
+
+    # Step 5: build deb
+    info "Building deb..."
+    nfpm pkg -f "$nfpm_cfg" -p deb -t "$dist_dir/" \
+        && ok "deb built" \
+        || err "deb build failed"
+
+    # Step 6: build rpm
+    info "Building rpm..."
+    nfpm pkg -f "$nfpm_cfg" -p rpm -t "$dist_dir/" \
+        && ok "rpm built" \
+        || err "rpm build failed"
+
+    rm -rf "$staging"
+
+    info "Packages in dist/:"
+    ls -1h "$dist_dir"/*.deb "$dist_dir"/*.rpm 2>/dev/null || info "(none)"
+}
+
+# ---------- ci ----------
 do_ci() {
     local dist_dir="$ROOT_DIR/dist"
     mkdir -p "$dist_dir"
 
-    info "CI build: all platform wheels -> dist/"
+    info "CI build: all platform wheels + packages -> dist/"
 
     # ---- Linux targets via manylinux Docker ----
     if command -v docker >/dev/null 2>&1; then
@@ -150,7 +238,6 @@ do_ci() {
                         || err "$target failed (non-fatal)"
                     ;;
                 *)
-                    # macOS / Windows — only buildable on native or with cross
                     info "Skipping $target (not Linux, needs native runner or cross-compilation)"
                     ;;
             esac
@@ -160,7 +247,7 @@ do_ci() {
         info "Falling back to local-platform-only build."
     fi
 
-    # ---- Native platform build (always) ----
+    # ---- Native platform wheel (always) ----
     info "Building native platform wheel..."
     maturin build --release -o "$dist_dir"
     ok "Native wheel built"
@@ -169,7 +256,7 @@ do_ci() {
     for entry in "${CI_TARGETS[@]}"; do
         read -r target arch <<< "$entry"
         case "$target" in
-            *-linux-*) continue ;;  # already done via Docker
+            *-linux-*) continue ;;
         esac
 
         if rustup target list --installed 2>/dev/null | grep -q "$target"; then
@@ -180,13 +267,19 @@ do_ci() {
         fi
     done
 
-    echo ""
-    info "Wheels in dist/:"
-    ls -1 "$dist_dir"/*.whl 2>/dev/null || info "(none)"
+    # ---- System packages (deb + rpm) ----
+    info "Building system packages..."
+    do_pkg
 
-    local count
-    count=$(ls -1 "$dist_dir"/*.whl 2>/dev/null | wc -l)
-    ok "CI build complete: $count wheel(s) in dist/"
+    echo ""
+    info "All artifacts in dist/:"
+    ls -1h "$dist_dir"/ 2>/dev/null
+    echo ""
+    local whl_count deb_count rpm_count
+    whl_count=$(ls -1 "$dist_dir"/*.whl 2>/dev/null | wc -l)
+    deb_count=$(ls -1 "$dist_dir"/*.deb 2>/dev/null | wc -l)
+    rpm_count=$(ls -1 "$dist_dir"/*.rpm 2>/dev/null | wc -l)
+    ok "CI complete: ${whl_count} wheel(s), ${deb_count} deb(s), ${rpm_count} rpm(s)"
 }
 
 # ---------- dispatch ----------
@@ -201,6 +294,9 @@ case "${COMMAND:-}" in
     test)
         do_install
         do_test
+        ;;
+    pkg)
+        do_pkg
         ;;
     ci)
         do_ci
