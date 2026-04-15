@@ -56,6 +56,24 @@ def import_cmd(file: str, repo: str):
 
 
 @main.command()
+@click.argument("file", type=click.Path(exists=True))
+@click.option("--repo", "-r", default=None, help="Repository path")
+def append(file: str, repo: str | None):
+    """Append a text file into an existing repository."""
+    repo_path = get_repo_path(repo)
+    log_repo = LogRepo.open(repo_path)
+
+    before = log_repo.original_line_count()
+    with console.status("Appending log file..."):
+        added = log_repo.append_file(file)
+    after = log_repo.original_line_count()
+
+    console.print(f"[green]Appended:[/green] {file}")
+    console.print(f"  New lines: {added:,}")
+    console.print(f"  Total:     {before:,} -> {after:,}")
+
+
+@main.command()
 @click.option("--repo", "-r", default=None, help="Repository path")
 def info(repo: str | None):
     """Show repository information."""

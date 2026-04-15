@@ -130,6 +130,57 @@ impl LogRepo {
         })
     }
 
+    /// Append data from a file into this repository.
+    pub fn append_file(&mut self, source_file: &Path) -> Result<usize> {
+        let data = fs::read(source_file)?;
+        self.append_bytes(&data)
+    }
+
+    /// Append raw bytes into this repository.
+    /// Returns the number of new lines appended.
+    pub fn append_bytes(&mut self, data: &[u8]) -> Result<usize> {
+        if data.is_empty() {
+            return Ok(0);
+        }
+
+        let existing_chunks = self.index.chunks.len() as u32;
+        let existing_lines = self.index.total_lines;
+
+        // Build index for new data, using the same lines_per_chunk
+        let builder = IndexBuilder::new().with_lines_per_chunk(self.index.lines_per_chunk);
+        let (mut new_index, new_chunks_data) = builder.build(data);
+
+        if new_index.total_lines == 0 {
+            return Ok(0);
+        }
+
+        // Adjust new chunk IDs and line_start offsets
+        for chunk in &mut new_index.chunks {
+            chunk.id += existing_chunks;
+            chunk.line_start += existing_lines;
+        }
+
+        // Write new compressed chunks (IDs continue from existing)
+        self.storage.write_chunks_at(&new_chunks_data, existing_chunks)?;
+
+        // Extend the index
+        self.index.total_lines += new_index.total_lines;
+        self.index.chunks.extend(new_index.chunks);
+
+        // Update metadata
+        self.metadata.original_size += data.len() as u64;
+        self.metadata.original_line_count = self.index.total_lines;
+
+        // Persist updated index and metadata
+        self.save_index()?;
+        self.save_metadata()?;
+
+        // Invalidate current lines cache (operations need to re-apply over full data)
+        self.current_lines = None;
+
+        Ok(new_index.total_lines)
+    }
+
     /// Clone this repository to a new path.
     pub fn clone_to(&self, dest_path: &Path) -> Result<Self> {
         if dest_path.exists() {
@@ -343,6 +394,18 @@ impl LogRepo {
     fn save_operations(&self) -> Result<()> {
         let json = serde_json::to_string_pretty(&self.operations)?;
         fs::write(self.path.join("operations.json"), json)?;
+        Ok(())
+    }
+
+    fn save_index(&self) -> Result<()> {
+        let json = serde_json::to_string_pretty(&self.index)?;
+        fs::write(self.path.join("index.json"), json)?;
+        Ok(())
+    }
+
+    fn save_metadata(&self) -> Result<()> {
+        let json = serde_json::to_string_pretty(&self.metadata)?;
+        fs::write(self.path.join("meta.json"), json)?;
         Ok(())
     }
 }

@@ -42,6 +42,16 @@ impl PyLogRepo {
         Ok(PyLogRepo { inner: new_repo })
     }
 
+    /// Append a text file into this repository. Returns number of new lines.
+    fn append_file(&mut self, source_file: &str) -> PyResult<usize> {
+        Ok(self.inner.append_file(&PathBuf::from(source_file))?)
+    }
+
+    /// Append raw text into this repository. Returns number of new lines.
+    fn append_text(&mut self, text: &str) -> PyResult<usize> {
+        Ok(self.inner.append_bytes(text.as_bytes())?)
+    }
+
     /// Get repository metadata.
     fn metadata(&self) -> PyResult<PyRepoMetadata> {
         Ok(PyRepoMetadata {

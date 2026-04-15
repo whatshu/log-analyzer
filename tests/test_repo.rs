@@ -391,3 +391,158 @@ fn test_read_range() {
     let lines = repo.read_original_lines(1, 3).unwrap();
     assert_eq!(lines, vec!["line1", "line2", "line3"]);
 }
+
+// -------- Append tests --------
+
+#[test]
+fn test_append_basic() {
+    let tmp = TempDir::new().unwrap();
+    let repo_path = tmp.path().join("repo");
+
+    let data = b"a\nb\nc\n";
+    let mut repo = LogRepo::import_from_bytes(&repo_path, data, "test".into()).unwrap();
+    assert_eq!(repo.original_line_count(), 3);
+
+    let added = repo.append_bytes(b"d\ne\n").unwrap();
+    assert_eq!(added, 2);
+    assert_eq!(repo.original_line_count(), 5);
+
+    assert_eq!(repo.read_original_line(0).unwrap(), "a");
+    assert_eq!(repo.read_original_line(3).unwrap(), "d");
+    assert_eq!(repo.read_original_line(4).unwrap(), "e");
+}
+
+#[test]
+fn test_append_multiple_times() {
+    let tmp = TempDir::new().unwrap();
+    let repo_path = tmp.path().join("repo");
+
+    let mut repo =
+        LogRepo::import_from_bytes(&repo_path, b"line0\n", "test".into()).unwrap();
+
+    repo.append_bytes(b"line1\nline2\n").unwrap();
+    repo.append_bytes(b"line3\n").unwrap();
+
+    assert_eq!(repo.original_line_count(), 4);
+    let lines = repo.read_all_original_lines().unwrap();
+    assert_eq!(lines, vec!["line0", "line1", "line2", "line3"]);
+}
+
+#[test]
+fn test_append_empty() {
+    let tmp = TempDir::new().unwrap();
+    let repo_path = tmp.path().join("repo");
+
+    let mut repo =
+        LogRepo::import_from_bytes(&repo_path, b"a\n", "test".into()).unwrap();
+
+    let added = repo.append_bytes(b"").unwrap();
+    assert_eq!(added, 0);
+    assert_eq!(repo.original_line_count(), 1);
+}
+
+#[test]
+fn test_append_preserves_operations() {
+    let tmp = TempDir::new().unwrap();
+    let repo_path = tmp.path().join("repo");
+
+    let mut repo =
+        LogRepo::import_from_bytes(&repo_path, b"INFO a\nERROR b\n", "test".into()).unwrap();
+
+    // Apply a filter
+    repo.apply_operation(Operation::Filter {
+        pattern: "ERROR".to_string(),
+        keep: true,
+    })
+    .unwrap();
+    assert_eq!(repo.current_line_count().unwrap(), 1);
+
+    // Append more data — operations re-apply over all data
+    repo.append_bytes(b"INFO c\nERROR d\n").unwrap();
+    assert_eq!(repo.original_line_count(), 4);
+
+    // Current state = filter applied to all 4 lines
+    let current = repo.get_current_lines().unwrap();
+    assert_eq!(current, vec!["ERROR b", "ERROR d"]);
+}
+
+#[test]
+fn test_append_persists_across_reopen() {
+    let tmp = TempDir::new().unwrap();
+    let repo_path = tmp.path().join("repo");
+
+    {
+        let mut repo =
+            LogRepo::import_from_bytes(&repo_path, b"x\ny\n", "test".into()).unwrap();
+        repo.append_bytes(b"z\n").unwrap();
+    }
+
+    let repo = LogRepo::open(&repo_path).unwrap();
+    assert_eq!(repo.original_line_count(), 3);
+    assert_eq!(repo.read_original_line(2).unwrap(), "z");
+}
+
+#[test]
+fn test_append_file() {
+    let tmp = TempDir::new().unwrap();
+    let repo_path = tmp.path().join("repo");
+    let extra_file = tmp.path().join("extra.log");
+
+    let mut repo =
+        LogRepo::import_from_bytes(&repo_path, b"first\n", "test".into()).unwrap();
+
+    fs::write(&extra_file, "second\nthird\n").unwrap();
+    let added = repo.append_file(&extra_file).unwrap();
+    assert_eq!(added, 2);
+    assert_eq!(repo.original_line_count(), 3);
+
+    let lines = repo.read_all_original_lines().unwrap();
+    assert_eq!(lines, vec!["first", "second", "third"]);
+}
+
+#[test]
+fn test_append_large_across_chunks() {
+    let tmp = TempDir::new().unwrap();
+    let repo_path = tmp.path().join("repo");
+
+    let first_batch = create_test_log(15_000);
+    let mut repo =
+        LogRepo::import_from_bytes(&repo_path, first_batch.as_bytes(), "batch1".into()).unwrap();
+    assert_eq!(repo.original_line_count(), 15_000);
+
+    let second_batch = create_test_log(10_000);
+    let added = repo.append_bytes(second_batch.as_bytes()).unwrap();
+    assert_eq!(added, 10_000);
+    assert_eq!(repo.original_line_count(), 25_000);
+
+    // Verify we can read lines from both batches
+    let line_0 = repo.read_original_line(0).unwrap();
+    assert!(line_0.contains("message number 0"));
+
+    let line_14999 = repo.read_original_line(14_999).unwrap();
+    assert!(line_14999.contains("message number 14999"));
+
+    // Lines from second batch
+    let line_15000 = repo.read_original_line(15_000).unwrap();
+    assert!(line_15000.contains("message number 0"));
+
+    let line_last = repo.read_original_line(24_999).unwrap();
+    assert!(line_last.contains("message number 9999"));
+}
+
+#[test]
+fn test_append_metadata_updated() {
+    let tmp = TempDir::new().unwrap();
+    let repo_path = tmp.path().join("repo");
+
+    let data1 = b"hello\n";
+    let mut repo =
+        LogRepo::import_from_bytes(&repo_path, data1, "test".into()).unwrap();
+    let size_before = repo.metadata.original_size;
+
+    let data2 = b"world\n";
+    repo.append_bytes(data2).unwrap();
+
+    assert_eq!(repo.metadata.original_size, size_before + data2.len() as u64);
+    assert_eq!(repo.metadata.original_line_count, 2);
+}

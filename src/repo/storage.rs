@@ -73,6 +73,20 @@ impl ChunkStorage {
         Ok(count)
     }
 
+    /// Write multiple chunks starting at a given ID offset, in parallel.
+    pub fn write_chunks_at(&self, chunks: &[Vec<u8>], id_offset: u32) -> Result<()> {
+        fs::create_dir_all(&self.chunks_dir)?;
+
+        chunks
+            .par_iter()
+            .enumerate()
+            .try_for_each(|(i, data)| -> Result<()> {
+                self.write_chunk(id_offset + i as u32, data)
+            })?;
+
+        Ok(())
+    }
+
     fn chunk_path(&self, id: u32) -> PathBuf {
         self.chunks_dir.join(format!("{:06}.zst", id))
     }
