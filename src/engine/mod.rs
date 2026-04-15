@@ -1,4 +1,5 @@
 pub mod collector;
+pub mod fast;
 mod processor;
 mod stream;
 

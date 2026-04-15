@@ -166,10 +166,38 @@ impl PyLogRepo {
 
     // --- Streaming engine methods (memory-efficient for large files) ---
 
-    /// Count lines matching a regex in the original data, streaming chunk-by-chunk.
-    /// Memory usage: O(chunk_size), not O(total_lines). Safe for >10GB files.
+    /// Count lines matching a regex in the original data.
+    /// Uses ripgrep's SIMD-accelerated searcher on compressed chunks.
     fn count_matches(&self, pattern: &str) -> PyResult<usize> {
-        Ok(self.inner.processor().count_matches(pattern)?)
+        Ok(crate::engine::fast::count_chunk_matches(
+            self.inner.storage(),
+            &self.inner.index,
+            pattern,
+        )?)
+    }
+
+    /// Count matches directly on a file on disk (fastest path, no import needed).
+    #[staticmethod]
+    fn count_file_matches(path: &str, pattern: &str) -> PyResult<usize> {
+        Ok(crate::engine::fast::count_file_matches(
+            &PathBuf::from(path),
+            pattern,
+        )?)
+    }
+
+    /// Search a file on disk for matching lines using ripgrep's searcher.
+    /// Returns list of (line_number, content). No import needed.
+    #[staticmethod]
+    fn search_file(
+        path: &str,
+        pattern: &str,
+        max_results: usize,
+    ) -> PyResult<Vec<(u64, String)>> {
+        Ok(crate::engine::fast::search_file(
+            &PathBuf::from(path),
+            pattern,
+            max_results,
+        )?)
     }
 
     /// Stream-filter original data to a file without loading all lines into memory.
@@ -195,10 +223,15 @@ impl PyLogRepo {
             .replace_to_file(pattern, replacement, &PathBuf::from(output), None)?)
     }
 
-    /// Search original data for lines matching a pattern, streaming chunk-by-chunk.
+    /// Search original data for lines matching a pattern using ripgrep's searcher.
     /// Returns list of (line_number, line_content) tuples.
     fn stream_search(&self, pattern: &str, max_results: usize) -> PyResult<Vec<(usize, String)>> {
-        Ok(self.inner.processor().search(pattern, max_results)?)
+        Ok(crate::engine::fast::search_chunks(
+            self.inner.storage(),
+            &self.inner.index,
+            pattern,
+            max_results,
+        )?)
     }
 
     /// Parallel search across all chunks. Faster but results are collected then sorted.
