@@ -41,7 +41,7 @@ maturin build --release       # Build .whl to target/wheels/
 ## Quick Start
 
 ```bash
-# Import a log file
+# Import a log file (creates "default" repo)
 log-analyzer import server.log
 
 # View the first 20 lines
@@ -50,17 +50,28 @@ log-analyzer view
 # Filter to keep only ERROR lines
 log-analyzer filter "ERROR" --keep
 
-# See what happened
-log-analyzer history
-
 # Undo the filter
 log-analyzer undo
 
-# Export the current state
+# Clone for a separate analysis branch
+log-analyzer repo clone default errors
+log-analyzer repo use errors
+log-analyzer filter "ERROR" --keep
+
+# Switch back — original is untouched
+log-analyzer repo use default
+log-analyzer view
+
+# List all repos
+log-analyzer repo list
+
+# Export
 log-analyzer export filtered.log
 ```
 
 ## CLI Reference
+
+### Log operations
 
 | Command | Description |
 |---------|-------------|
@@ -77,20 +88,39 @@ log-analyzer export filtered.log
 | `undo` | Undo the last operation |
 | `history` | Show the operation journal |
 | `export <file>` | Write the current state to a file |
-| `clone <dest>` | Clone the repository for parallel analysis |
 
-All commands accept `--repo <path>` (default: `.logrepo/`).
+### Repository management
+
+| Command | Description |
+|---------|-------------|
+| `repo list` | List all repos in the workspace (`*` marks active) |
+| `repo use <name>` | Switch the active repository |
+| `repo clone <src> <dst>` | Clone a repo under a new name |
+| `repo remove <name>` | Delete a repository |
+
+All log commands accept `--repo <name>` to target a specific repo (default: active repo).
+The workspace directory defaults to `.logrepo/` and can be changed with `--workspace <path>`.
 
 ## Python API
 
 ```python
+from log_analyzer import Workspace
+
+# Open workspace (auto-creates on first import)
+ws = Workspace(".logrepo")
+
+# Import into a named repo
+ws.import_file("server.log", "default")
+
+# Manage repos
+ws.clone_repo("default", "errors")
+ws.set_active("errors")
+repo = ws.open_active()          # or ws.open_repo("errors")
+print(ws.list())                  # ["default", "errors"]
+
+# Low-level: open a repo directly by path
 from log_analyzer import LogRepo
-
-# Import
-repo = LogRepo.import_file("./repo", "server.log")
-
-# Or open existing
-repo = LogRepo.open("./repo")
+repo = LogRepo.open("./some/path")
 
 # Read lines
 lines = repo.read_lines(0, 10)       # first 10 lines
@@ -172,19 +202,23 @@ log-analyzer info   # shows total lines across all parts
 ### Branching analysis
 
 ```bash
-# Create a base repo
-log-analyzer import access.log --repo base
+# Import base data
+log-analyzer import access.log
 
 # Clone for two independent analyses
-log-analyzer clone error_analysis --repo base
-log-analyzer clone perf_analysis  --repo base
+log-analyzer repo clone default error_analysis
+log-analyzer repo clone default perf_analysis
 
 # Analyze errors
-log-analyzer filter '" 500 ' --keep --repo error_analysis
-log-analyzer export 500_errors.log  --repo error_analysis
+log-analyzer repo use error_analysis
+log-analyzer filter '" 500 ' --keep
+log-analyzer export 500_errors.log
 
-# Analyze performance
+# Analyze performance (target by name without switching)
 log-analyzer filter 'slow\|timeout' --keep --repo perf_analysis
+
+# Original data untouched
+log-analyzer view --repo default
 ```
 
 ### Anonymizing sensitive data
@@ -252,6 +286,7 @@ log-analyzer/
 │   ├── error.rs            Error types
 │   ├── repo/               Log repository
 │   │   ├── mod.rs          LogRepo: create, open, append, operations, undo
+│   │   ├── workspace.rs    Workspace: named repo management, clone, migrate
 │   │   ├── storage.rs      ChunkStorage: zstd compressed chunk I/O
 │   │   └── metadata.rs     RepoMetadata: UUID, timestamps, stats
 │   ├── index/              Line indexing
@@ -273,30 +308,37 @@ log-analyzer/
 │   ├── __init__.py         Re-exports LogRepo, RepoMetadata, OperationRecord
 │   └── cli.py              Click CLI (import, append, view, filter, replace, ...)
 │
-├── tests/                  Test suite (67 Rust + 85 Python = 152 tests)
+├── tests/                  Test suite (80 Rust + 101 Python = 181 tests)
 ├── benchmarks/             Performance benchmarks
 │   └── bench.py            Comparison vs grep, rg, sed, awk, Python
 └── .claude/                AI agent skills
 ```
 
-### Repository layout on disk
+### Workspace layout on disk
 
 ```
-.logrepo/
-├── meta.json               Repository metadata (ID, source, size, line count)
-├── index.json              Line index (chunk boundaries, byte offsets)
-├── chunks/                 Compressed data chunks
-│   ├── 000000.zst
-│   ├── 000001.zst
+.logrepo/                       Workspace root
+├── workspace.json              Active repo tracker: {"active": "default"}
+├── default/                    Named repository
+│   ├── meta.json               Repository metadata (ID, source, size, line count)
+│   ├── index.json              Line index (chunk boundaries, byte offsets)
+│   ├── chunks/                 Compressed data chunks
+│   │   ├── 000000.zst
+│   │   ├── 000001.zst
+│   │   └── ...
+│   └── operations.json         Operation journal (for undo/redo)
+├── error_analysis/             Cloned repository (same structure)
 │   └── ...
-└── operations.json         Operation journal (for undo/redo)
+└── ...
 ```
+
+Old flat `.logrepo/` layouts (pre-workspace) are auto-migrated on first open.
 
 ## Testing
 
 ```bash
-cargo test                  # Rust tests (67 tests)
-pytest tests/ -v            # Python tests (85 tests)
+cargo test                  # Rust tests (80 tests)
+pytest tests/ -v            # Python tests (101 tests)
 ./build.sh test             # Build, install, and run all tests
 ```
 

@@ -41,7 +41,7 @@ maturin build --release       # 构建 .whl 到 target/wheels/
 ## 快速开始
 
 ```bash
-# 导入日志文件
+# 导入日志文件（创建 "default" 仓库）
 log-analyzer import server.log
 
 # 查看前 20 行
@@ -50,17 +50,28 @@ log-analyzer view
 # 过滤保留 ERROR 行
 log-analyzer filter "ERROR" --keep
 
-# 查看操作历史
-log-analyzer history
-
 # 撤销过滤
 log-analyzer undo
 
-# 导出当前状态
+# 克隆出独立分析分支
+log-analyzer repo clone default errors
+log-analyzer repo use errors
+log-analyzer filter "ERROR" --keep
+
+# 切回原始——数据不受影响
+log-analyzer repo use default
+log-analyzer view
+
+# 列出所有 repo
+log-analyzer repo list
+
+# 导出
 log-analyzer export filtered.log
 ```
 
 ## CLI 命令参考
+
+### 日志操作
 
 | 命令 | 说明 |
 |------|------|
@@ -77,9 +88,18 @@ log-analyzer export filtered.log
 | `undo` | 撤销上一个操作 |
 | `history` | 显示操作日志 |
 | `export <file>` | 将当前状态写入文件 |
-| `clone <dest>` | 克隆仓库用于并行分析 |
 
-所有命令支持 `--repo <path>`（默认：`.logrepo/`）。
+### 仓库管理
+
+| 命令 | 说明 |
+|------|------|
+| `repo list` | 列出所有仓库（`*` 标记当前活跃） |
+| `repo use <name>` | 切换活跃仓库 |
+| `repo clone <src> <dst>` | 按名称克隆仓库 |
+| `repo remove <name>` | 删除仓库 |
+
+所有日志命令支持 `--repo <name>` 指定目标仓库（默认：活跃仓库）。
+工作区目录默认为 `.logrepo/`，可通过 `--workspace <path>` 修改。
 
 ## Python API
 
@@ -168,19 +188,23 @@ log-analyzer info   # 显示所有分段的总行数
 ### 分支分析
 
 ```bash
-# 创建基础仓库
-log-analyzer import access.log --repo base
+# 导入基础数据
+log-analyzer import access.log
 
-# 克隆进行两个独立分析
-log-analyzer clone error_analysis --repo base
-log-analyzer clone perf_analysis  --repo base
+# 克隆出两个独立分析分支
+log-analyzer repo clone default error_analysis
+log-analyzer repo clone default perf_analysis
 
 # 分析错误
-log-analyzer filter '" 500 ' --keep --repo error_analysis
-log-analyzer export 500_errors.log  --repo error_analysis
+log-analyzer repo use error_analysis
+log-analyzer filter '" 500 ' --keep
+log-analyzer export 500_errors.log
 
-# 分析性能
+# 分析性能（通过名称指定，无需切换）
 log-analyzer filter 'slow\|timeout' --keep --repo perf_analysis
+
+# 原始数据不受影响
+log-analyzer view --repo default
 ```
 
 ### 敏感数据脱敏
@@ -247,6 +271,7 @@ log-analyzer/
 │   ├── error.rs            错误类型
 │   ├── repo/               日志仓库
 │   │   ├── mod.rs          LogRepo：创建、打开、追加、操作、撤销
+│   │   ├── workspace.rs    Workspace：命名仓库管理、克隆、迁移
 │   │   ├── storage.rs      ChunkStorage：zstd 压缩块 I/O
 │   │   └── metadata.rs     RepoMetadata：UUID、时间戳、统计
 │   ├── index/              行索引
@@ -268,7 +293,7 @@ log-analyzer/
 │   ├── __init__.py         导出 LogRepo、RepoMetadata、OperationRecord
 │   └── cli.py              Click CLI
 │
-├── tests/                  测试套件（67 Rust + 85 Python = 152 个测试）
+├── tests/                  测试套件（80 Rust + 101 Python = 181 个测试）
 ├── benchmarks/             性能基准测试
 │   └── bench.py            与 grep、rg、sed、awk、Python 对比
 └── .claude/                AI agent skills
@@ -277,8 +302,8 @@ log-analyzer/
 ## 测试
 
 ```bash
-cargo test                  # Rust 测试（67 个）
-pytest tests/ -v            # Python 测试（85 个）
+cargo test                  # Rust 测试（80 个）
+pytest tests/ -v            # Python 测试（101 个）
 ./build.sh test             # 构建、安装并运行全部测试
 ```
 
