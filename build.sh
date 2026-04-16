@@ -20,6 +20,17 @@ CI_TARGETS=(
     "x86_64-pc-windows-msvc       -"
 )
 
+# Docker image to use for each Linux cross-compilation target.
+# ghcr.io/pyo3/maturin   — native x86_64 manylinux builder
+# ghcr.io/rust-cross/maturin-cross:<arch> — cross-compilers with full toolchain
+docker_image_for() {
+    case "$1" in
+        x86_64-unknown-linux-gnu)  echo "ghcr.io/pyo3/maturin" ;;
+        aarch64-unknown-linux-gnu) echo "ghcr.io/rust-cross/maturin-cross:aarch64" ;;
+        *)                         echo "ghcr.io/pyo3/maturin" ;;
+    esac
+}
+
 # ---------- check prerequisites ----------
 check_prereqs() {
     local missing=()
@@ -152,11 +163,24 @@ ensure_nfpm() {
     local tmp_dir
     tmp_dir=$(mktemp -d)
     info "Downloading nfpm v${nfpm_ver}..."
-    curl -fsSL "$url" | tar xz -C "$tmp_dir" nfpm
+    if ! curl -fsSL "$url" | tar xz -C "$tmp_dir" nfpm; then
+        err "Failed to download/extract nfpm from $url"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    if [[ ! -x "$tmp_dir/nfpm" ]]; then
+        err "nfpm binary not found after extraction"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
 
     # Install to project-local bin
     mkdir -p "$ROOT_DIR/.bin"
-    mv "$tmp_dir/nfpm" "$ROOT_DIR/.bin/nfpm"
+    if ! mv "$tmp_dir/nfpm" "$ROOT_DIR/.bin/nfpm"; then
+        err "Failed to install nfpm to .bin/"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
     rm -rf "$tmp_dir"
     export PATH="$ROOT_DIR/.bin:$PATH"
     ok "nfpm installed to .bin/nfpm"
@@ -230,29 +254,30 @@ do_ci() {
 
     info "CI build: all platform wheels + packages -> dist/"
 
-    # ---- Linux targets via manylinux Docker ----
-    local maturin_image="ghcr.io/pyo3/maturin"
+    # ---- Linux targets via manylinux / cross-compilation Docker ----
     if command -v docker >/dev/null 2>&1; then
-        # Pull once up-front so the user sees download progress clearly.
-        if ! docker image inspect "$maturin_image" >/dev/null 2>&1; then
-            info "Pulling $maturin_image (first run — may take a few minutes)..."
-            docker pull "$maturin_image" || { err "Failed to pull $maturin_image — skipping Docker builds."; }
-        fi
-
         for entry in "${CI_TARGETS[@]}"; do
             read -r target arch <<< "$entry"
             case "$target" in
                 *-linux-*)
-                    if docker image inspect "$maturin_image" >/dev/null 2>&1; then
-                        info "Building $target (manylinux, arch=$arch)..."
-                        docker run --rm \
-                            -v "$ROOT_DIR":/io \
-                            -w /io \
-                            "$maturin_image" \
-                            build --release --find-interpreter --target "$target" -o /io/dist \
-                            && ok "$target done" \
-                            || err "$target failed (non-fatal)"
+                    local image
+                    image=$(docker_image_for "$target")
+                    # Pull image up-front so the user sees download progress.
+                    if ! docker image inspect "$image" >/dev/null 2>&1; then
+                        info "Pulling $image (may take a few minutes)..."
+                        if ! docker pull "$image"; then
+                            err "Failed to pull $image — skipping $target"
+                            continue
+                        fi
                     fi
+                    info "Building $target (image=$image)..."
+                    docker run --rm \
+                        -v "$ROOT_DIR":/io \
+                        -w /io \
+                        "$image" \
+                        build --release --find-interpreter --target "$target" -o /io/dist \
+                        && ok "$target done" \
+                        || err "$target failed (non-fatal)"
                     ;;
                 *)
                     info "Skipping $target (not Linux, needs native runner or cross-compilation)"
