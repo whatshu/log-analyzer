@@ -131,6 +131,8 @@ do_test() {
 }
 
 # ---------- package (deb + rpm) ----------
+# do_pkg [prebuilt-wheel-path]
+#   If a wheel path is given, skip rebuilding and use it directly.
 ensure_nfpm() {
     if command -v nfpm >/dev/null 2>&1; then
         return 0
@@ -161,11 +163,17 @@ ensure_nfpm() {
 }
 
 do_pkg() {
+    local prebuilt_wheel="${1:-}"
     local dist_dir="$ROOT_DIR/dist"
     mkdir -p "$dist_dir"
 
-    # Step 1: build the wheel
-    do_build
+    # Step 1: build the wheel (or reuse one passed in)
+    if [[ -n "$prebuilt_wheel" ]]; then
+        WHEEL="$prebuilt_wheel"
+        info "Using pre-built wheel: $(basename "$WHEEL")"
+    else
+        do_build
+    fi
 
     # Step 2: create a staging directory with a self-contained venv
     local staging
@@ -223,19 +231,28 @@ do_ci() {
     info "CI build: all platform wheels + packages -> dist/"
 
     # ---- Linux targets via manylinux Docker ----
+    local maturin_image="ghcr.io/pyo3/maturin"
     if command -v docker >/dev/null 2>&1; then
+        # Pull once up-front so the user sees download progress clearly.
+        if ! docker image inspect "$maturin_image" >/dev/null 2>&1; then
+            info "Pulling $maturin_image (first run — may take a few minutes)..."
+            docker pull "$maturin_image" || { err "Failed to pull $maturin_image — skipping Docker builds."; }
+        fi
+
         for entry in "${CI_TARGETS[@]}"; do
             read -r target arch <<< "$entry"
             case "$target" in
                 *-linux-*)
-                    info "Building $target (manylinux, arch=$arch)..."
-                    docker run --rm \
-                        -v "$ROOT_DIR":/io \
-                        -w /io \
-                        "ghcr.io/pyo3/maturin" \
-                        build --release --find-interpreter --target "$target" -o /io/dist \
-                        && ok "$target done" \
-                        || err "$target failed (non-fatal)"
+                    if docker image inspect "$maturin_image" >/dev/null 2>&1; then
+                        info "Building $target (manylinux, arch=$arch)..."
+                        docker run --rm \
+                            -v "$ROOT_DIR":/io \
+                            -w /io \
+                            "$maturin_image" \
+                            build --release --find-interpreter --target "$target" -o /io/dist \
+                            && ok "$target done" \
+                            || err "$target failed (non-fatal)"
+                    fi
                     ;;
                 *)
                     info "Skipping $target (not Linux, needs native runner or cross-compilation)"
@@ -249,8 +266,9 @@ do_ci() {
 
     # ---- Native platform wheel (always) ----
     info "Building native platform wheel..."
-    maturin build --release -o "$dist_dir"
-    ok "Native wheel built"
+    do_build   # sets $WHEEL
+    cp "$WHEEL" "$dist_dir/"
+    ok "Native wheel: $(basename "$WHEEL")"
 
     # ---- Cross-compile non-Linux if toolchains are installed ----
     for entry in "${CI_TARGETS[@]}"; do
@@ -269,7 +287,7 @@ do_ci() {
 
     # ---- System packages (deb + rpm) ----
     info "Building system packages..."
-    do_pkg
+    do_pkg "$WHEEL"   # reuse already-built native wheel; no second compile
 
     echo ""
     info "All artifacts in dist/:"
