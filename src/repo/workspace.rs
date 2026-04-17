@@ -213,6 +213,59 @@ impl Workspace {
         Ok(())
     }
 
+    /// Merge multiple source repos (in order) into a new target repo.
+    ///
+    /// Each source's current state (after its operations) is concatenated in
+    /// the order given.  The target repo must not already exist.
+    pub fn merge_repos(&self, sources: &[&str], target: &str) -> Result<LogRepo> {
+        if sources.is_empty() {
+            return Err(LogAnalyzerError::Repo(
+                "merge_repos: at least one source repo required".to_string(),
+            ));
+        }
+        self.ensure_initialized()?;
+        self.validate_new_name(target)?;
+
+        let target_path = self.repo_path(target);
+        let source_label = format!("merge({})", sources.join(", "));
+        let mut target_repo: Option<LogRepo> = None;
+
+        for &name in sources {
+            let mut src = self.open_repo(name)?;
+            let lines = src.get_current_lines()?;
+
+            // Serialize to bytes: newline-terminated lines
+            let mut data = lines.join("\n");
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            let bytes = data.as_bytes();
+
+            match target_repo {
+                None => {
+                    let repo = LogRepo::import_from_bytes(
+                        &target_path,
+                        bytes,
+                        source_label.clone(),
+                    )?;
+                    target_repo = Some(repo);
+                }
+                Some(ref mut repo) => {
+                    repo.append_bytes(bytes)?;
+                }
+            }
+        }
+
+        // sources all empty → create an empty repo
+        if target_repo.is_none() {
+            let repo =
+                LogRepo::import_from_bytes(&target_path, b"", source_label)?;
+            target_repo = Some(repo);
+        }
+
+        Ok(target_repo.unwrap())
+    }
+
     /// Check if a repo name exists.
     pub fn has_repo(&self, name: &str) -> bool {
         self.repo_path(name).join("meta.json").exists()

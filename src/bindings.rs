@@ -578,6 +578,17 @@ impl PyWorkspace {
         Ok(self.inner.remove_repo(name)?)
     }
 
+    /// Merge multiple source repos (in order) into a new target repo.
+    ///
+    /// Each source's current state (after its operations) is concatenated in
+    /// the order given.  The target repo must not already exist.
+    fn merge_repos(&self, sources: Vec<String>, target: &str) -> PyResult<PyLogRepo> {
+        let source_refs: Vec<&str> = sources.iter().map(|s| s.as_str()).collect();
+        Ok(PyLogRepo {
+            inner: self.inner.merge_repos(&source_refs, target)?,
+        })
+    }
+
     /// Workspace root path.
     fn root(&self) -> String {
         self.inner.root().to_string_lossy().to_string()

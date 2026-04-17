@@ -295,6 +295,33 @@ def modify(line_index: int, new_content: str, repo: str | None, workspace: str |
 
 
 @main.command()
+@click.argument("sources", nargs=-1, required=True)
+@click.option("--into", "-i", "target", required=True, help="Target repository name")
+@click.option("--workspace", "-w", default=None, help="Workspace directory")
+def merge(sources: tuple[str, ...], target: str, workspace: str | None):
+    """Merge multiple repositories into a new one (in order).
+
+    SOURCES are repo names whose current state (after all operations)
+    will be concatenated in the given order into a new repo TARGET.
+
+    Example:
+      log-analyzer merge repoA repoB repoC --into combined
+    """
+    ws = get_workspace(workspace)
+    if not ws.is_initialized():
+        console.print("[red]No workspace found. Use 'import' to create one.[/red]")
+        sys.exit(1)
+
+    with console.status(f"Merging {', '.join(sources)} -> {target}..."):
+        merged = ws.merge_repos(list(sources), target)
+
+    meta = merged.metadata()
+    console.print(f"[green]Merged {len(sources)} repo(s) into '{target}'[/green]")
+    console.print(f"  Sources: {', '.join(sources)}")
+    console.print(f"  Lines:   {meta.original_line_count:,}")
+
+
+@main.command()
 @click.option("--repo", "-r", default=None, help="Repository name")
 @click.option("--workspace", "-w", default=None, help="Workspace directory")
 def undo(repo: str | None, workspace: str | None):
